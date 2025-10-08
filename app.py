@@ -61,6 +61,19 @@ pattern_input = st.sidebar.text_input(
 # Convert patterns to list
 patterns = [p.strip() for p in pattern_input.split(",") if p.strip()] if pattern_input else []
 
+# Output folder configuration
+st.sidebar.header("File Persistence")
+output_folder = st.sidebar.text_input(
+    "Output Folder",
+    value="./output",
+    help="Local folder to save downloaded Excel files"
+)
+persist_files = st.sidebar.checkbox(
+    "Download & Save Files",
+    value=False,
+    help="Automatically download and save all matching files to output folder"
+)
+
 # Initialize session state
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -225,12 +238,18 @@ if st.session_state.authenticated:
                 # Prepare data for display
                 file_data = []
                 for file in excel_files:
+                    # Handle size - ensure it's numeric
+                    try:
+                        size_kb = round(float(file['size']) / 1024, 2) if file.get('size') else 0
+                    except (ValueError, TypeError):
+                        size_kb = 0
+
                     file_data.append({
                         "Filename": file['name'],
                         "Folder": file.get('relative_folder', 'N/A'),
                         "Full Path": file.get('folder_path', 'N/A'),
                         "Modified": file['modified'],
-                        "Size (KB)": round(file['size'] / 1024, 2),
+                        "Size (KB)": size_kb,
                         "Modified By": file.get('modified_by', 'N/A')
                     })
 
@@ -247,6 +266,79 @@ if st.session_state.authenticated:
                     file_name=f"sharepoint_files_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
+
+                # File persistence section
+                if persist_files:
+                    st.subheader("💾 Download & Save Files")
+
+                    if st.button("📥 Download All Matching Files", type="primary"):
+                        import os
+                        import re
+                        from pathlib import Path
+
+                        # Create output folder if it doesn't exist
+                        output_path = Path(output_folder)
+                        output_path.mkdir(parents=True, exist_ok=True)
+
+                        # Progress tracking
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        success_count = 0
+                        error_count = 0
+                        error_files = []
+
+                        for idx, file in enumerate(excel_files):
+                            try:
+                                # Update progress
+                                progress = (idx + 1) / len(excel_files)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Downloading {idx + 1}/{len(excel_files)}: {file['name']}")
+
+                                # Create folder structure to preserve hierarchy
+                                relative_folder = file.get('relative_folder', 'root')
+                                if relative_folder == '(current)' or relative_folder == '(root)':
+                                    relative_folder = 'root'
+
+                                # Sanitize folder path
+                                safe_folder = re.sub(r'[<>:"|?*]', '_', relative_folder)
+                                file_output_path = output_path / safe_folder
+
+                                # Create subfolder
+                                file_output_path.mkdir(parents=True, exist_ok=True)
+
+                                # Download file
+                                file_content = sp_client.download_file(file['server_relative_url'])
+
+                                # Save file
+                                full_file_path = file_output_path / file['name']
+                                with open(full_file_path, 'wb') as f:
+                                    f.write(file_content)
+
+                                success_count += 1
+
+                            except Exception as e:
+                                error_count += 1
+                                error_files.append(f"{file['name']}: {str(e)}")
+                                continue
+
+                        # Clear progress
+                        progress_bar.empty()
+                        status_text.empty()
+
+                        # Show results
+                        if success_count > 0:
+                            st.success(f"✅ Successfully downloaded {success_count} file(s) to: {output_folder}")
+
+                            # Save metadata
+                            metadata_file = output_path / f"metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                            df.to_csv(metadata_file, index=False)
+                            st.info(f"📋 Metadata saved to: {metadata_file}")
+
+                        if error_count > 0:
+                            st.warning(f"⚠️ Failed to download {error_count} file(s)")
+                            with st.expander("Show errors"):
+                                for error in error_files:
+                                    st.text(error)
 
                 # File selection for content extraction
                 st.subheader("📄 Extract File Content")
