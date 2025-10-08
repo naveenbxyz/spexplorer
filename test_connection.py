@@ -24,20 +24,32 @@ def test_connection():
         print("⚠️  SSL verification disabled (useful for self-signed certificates)")
 
     print("\nAuthentication Methods:")
-    print("1. Windows Authentication (NTLM)")
-    print("2. Basic Authentication")
-    print("3. OAuth (Client Credentials)")
-    print("4. Access Token")
+    print("1. Windows Integrated (Current User - no password needed)")
+    print("2. Windows Authentication (NTLM with username/password)")
+    print("3. Basic Authentication")
+    print("4. OAuth (Client Credentials)")
+    print("5. Access Token")
 
-    auth_choice = input("\nSelect method (1-4): ").strip()
+    auth_choice = input("\nSelect method (1-5): ").strip()
 
     try:
-        if auth_choice in ["1", "2"]:
+        if auth_choice == "1":
+            # Windows Integrated Auth
+            print("\n🔐 Testing Windows Integrated authentication (current user)...")
+            print("   This will use your current Windows login credentials automatically")
+
+            client = SharePointClient(
+                site_url=site_url,
+                auth_method="integrated",
+                verify_ssl=verify_ssl
+            )
+
+        elif auth_choice in ["2", "3"]:
             # Windows or Basic auth
             username = input("Username (DOMAIN\\user or user@domain.com): ").strip()
             password = input("Password: ").strip()
 
-            auth_method = "ntlm" if auth_choice == "1" else "basic"
+            auth_method = "ntlm" if auth_choice == "2" else "basic"
 
             print(f"\n🔐 Testing {auth_method.upper()} authentication...")
 
@@ -49,7 +61,7 @@ def test_connection():
                 verify_ssl=verify_ssl
             )
 
-        elif auth_choice == "3":
+        elif auth_choice == "4":
             # OAuth
             client_id = input("Client ID: ").strip()
             client_secret = input("Client Secret: ").strip()
@@ -66,7 +78,7 @@ def test_connection():
                 verify_ssl=verify_ssl
             )
 
-        elif auth_choice == "4":
+        elif auth_choice == "5":
             # Access Token
             access_token = input("Access Token: ").strip()
 

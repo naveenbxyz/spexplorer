@@ -5,11 +5,24 @@ from datetime import datetime
 import json
 import urllib.parse
 
+# Optional imports for Windows Integrated Auth
+try:
+    from requests_negotiate_sspi import HttpNegotiateAuth
+    SSPI_AVAILABLE = True
+except ImportError:
+    SSPI_AVAILABLE = False
+
+try:
+    from requests_kerberos import HTTPKerberosAuth, OPTIONAL
+    KERBEROS_AVAILABLE = True
+except ImportError:
+    KERBEROS_AVAILABLE = False
+
 
 class SharePointClient:
     """
     SharePoint REST API Client for authentication, folder browsing, and file operations.
-    Supports OAuth2, Access Token, NTLM (Windows Authentication), and Session-based auth.
+    Supports OAuth2, Access Token, NTLM, Windows Integrated (SSPI), and Kerberos authentication.
     """
 
     def __init__(
@@ -33,9 +46,9 @@ class SharePointClient:
             client_secret: Azure AD App Client Secret (for OAuth)
             tenant_id: Azure AD Tenant ID (for OAuth)
             access_token: Pre-obtained access token
-            username: Username for NTLM/Basic auth
-            password: Password for NTLM/Basic auth
-            auth_method: Authentication method - "oauth", "token", "ntlm", "basic"
+            username: Username for NTLM/Basic auth (not needed for "integrated")
+            password: Password for NTLM/Basic auth (not needed for "integrated")
+            auth_method: Authentication method - "oauth", "token", "ntlm", "basic", "integrated"
             verify_ssl: Verify SSL certificates (default True, set False for self-signed certs)
         """
         self.site_url = site_url.rstrip('/')
@@ -74,7 +87,27 @@ class SharePointClient:
             'Content-Type': 'application/json;odata=verbose'
         })
 
-        if self.auth_method == "ntlm":
+        if self.auth_method == "integrated":
+            # Windows Integrated Authentication (UseDefaultCredentials = true)
+            # Uses current logged-in Windows credentials
+            if SSPI_AVAILABLE:
+                # Windows SSPI (preferred for Windows)
+                self.session.auth = HttpNegotiateAuth()
+                self._test_connection()
+                return "Windows Integrated (SSPI) authenticated"
+            elif KERBEROS_AVAILABLE:
+                # Kerberos (for Linux/Mac)
+                self.session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
+                self._test_connection()
+                return "Windows Integrated (Kerberos) authenticated"
+            else:
+                raise ValueError(
+                    "Windows Integrated Authentication requires additional package.\n"
+                    "Install: pip install requests-negotiate-sspi (Windows)\n"
+                    "     or: pip install requests-kerberos (Linux/Mac)"
+                )
+
+        elif self.auth_method == "ntlm":
             # Windows Authentication (NTLM)
             if not self.username or not self.password:
                 raise ValueError("Username and password required for NTLM authentication")
@@ -135,8 +168,17 @@ class SharePointClient:
         url = f"{self.site_url}/_api/web"
         response = self.session.get(url, verify=self.verify_ssl)
 
-        if response.status_code != 200:
-            raise Exception(f"Connection test failed: {response.status_code} - {response.text}")
+        if response.status_code == 401:
+            error_msg = f"Authentication failed (401 Unauthorized). "
+            if self.auth_method == "ntlm":
+                error_msg += "Please check:\n"
+                error_msg += "  - Username format: Use 'DOMAIN\\username' or 'username@domain.com'\n"
+                error_msg += "  - Password is correct\n"
+                error_msg += "  - Account has access to SharePoint site\n"
+                error_msg += f"  - Attempted username: {self.username}"
+            raise Exception(error_msg)
+        elif response.status_code != 200:
+            raise Exception(f"Connection test failed: {response.status_code} - {response.text if response.text else 'No error message'}")
 
     def get_site_info(self) -> Dict:
         """

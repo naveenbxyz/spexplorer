@@ -68,6 +68,28 @@ Use an existing SharePoint access token obtained through other means.
    - Click "Extract to JSON"
    - View the extracted data and download as JSON
 
+## Troubleshooting Authentication (401 Error)
+
+If you're getting a **401 Unauthorized** error:
+
+### 1. Run the diagnostic tool:
+```bash
+python diagnose_auth.py
+```
+
+This will test all authentication methods and tell you which one works.
+
+### 2. Try different username formats:
+- `DOMAIN\username` (e.g., `CONTOSO\john.doe`)
+- `username@domain.com` (e.g., `john.doe@company.com`)
+- `username` (just username)
+
+### 3. Disable SSL verification:
+For internal SharePoint with self-signed certificates, uncheck "Verify SSL Certificate" in the app.
+
+### 4. Check the troubleshooting guide:
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions.
+
 ## File Structure
 
 ```
@@ -75,7 +97,10 @@ spexplorer/
 ├── app.py                  # Main Streamlit application
 ├── sharepoint_client.py    # SharePoint REST API client
 ├── excel_extractor.py      # Excel to JSON converter
+├── test_connection.py      # Connection test script
+├── diagnose_auth.py        # Authentication diagnostics
 ├── requirements.txt        # Python dependencies
+├── TROUBLESHOOTING.md      # Detailed troubleshooting guide
 └── README.md              # This file
 ```
 

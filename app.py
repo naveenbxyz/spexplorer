@@ -20,10 +20,14 @@ site_url = st.sidebar.text_input(
 
 auth_method = st.sidebar.selectbox(
     "Authentication Method",
-    ["Windows Authentication (NTLM)", "Basic Authentication", "Client Credentials (OAuth)", "Access Token"]
+    ["Windows Integrated (Current User)", "Windows Authentication (NTLM)", "Basic Authentication", "Client Credentials (OAuth)", "Access Token"]
 )
 
-if auth_method in ["Windows Authentication (NTLM)", "Basic Authentication"]:
+if auth_method == "Windows Integrated (Current User)":
+    st.sidebar.success("✅ Uses your current Windows login")
+    st.sidebar.info("💡 No username/password needed - automatically uses your logged-in Windows credentials")
+    st.sidebar.warning("⚠️ Requires: pip install requests-negotiate-sspi")
+elif auth_method in ["Windows Authentication (NTLM)", "Basic Authentication"]:
     st.sidebar.info("💡 Use your Windows/domain credentials")
     username = st.sidebar.text_input(
         "Username",
@@ -69,7 +73,13 @@ if 'current_folder' not in st.session_state:
 if st.sidebar.button("Connect to SharePoint"):
     try:
         with st.spinner("Connecting to SharePoint..."):
-            if auth_method == "Windows Authentication (NTLM)":
+            if auth_method == "Windows Integrated (Current User)":
+                sp_client = SharePointClient(
+                    site_url=site_url,
+                    auth_method="integrated",
+                    verify_ssl=verify_ssl
+                )
+            elif auth_method == "Windows Authentication (NTLM)":
                 sp_client = SharePointClient(
                     site_url=site_url,
                     username=username,
