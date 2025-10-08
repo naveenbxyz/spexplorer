@@ -1,13 +1,15 @@
 import requests
+from requests_ntlm import HttpNtlmAuth
 from typing import List, Dict, Optional
 from datetime import datetime
 import json
+import urllib.parse
 
 
 class SharePointClient:
     """
     SharePoint REST API Client for authentication, folder browsing, and file operations.
-    Supports both OAuth2 (Client Credentials) and Access Token authentication.
+    Supports OAuth2, Access Token, NTLM (Windows Authentication), and Session-based auth.
     """
 
     def __init__(
@@ -16,48 +18,81 @@ class SharePointClient:
         client_id: Optional[str] = None,
         client_secret: Optional[str] = None,
         tenant_id: Optional[str] = None,
-        access_token: Optional[str] = None
+        access_token: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        auth_method: str = "oauth"
     ):
         """
         Initialize SharePoint client.
 
         Args:
-            site_url: Full SharePoint site URL (e.g., https://tenant.sharepoint.com/sites/site)
+            site_url: Full SharePoint site URL
             client_id: Azure AD App Client ID (for OAuth)
             client_secret: Azure AD App Client Secret (for OAuth)
             tenant_id: Azure AD Tenant ID (for OAuth)
-            access_token: Pre-obtained access token (alternative to OAuth)
+            access_token: Pre-obtained access token
+            username: Username for NTLM/Basic auth
+            password: Password for NTLM/Basic auth
+            auth_method: Authentication method - "oauth", "token", "ntlm", "basic"
         """
         self.site_url = site_url.rstrip('/')
         self.client_id = client_id
         self.client_secret = client_secret
         self.tenant_id = tenant_id
         self.access_token = access_token
+        self.username = username
+        self.password = password
+        self.auth_method = auth_method.lower()
         self.session = requests.Session()
 
         # Extract tenant and site info
         parts = site_url.split('/')
-        self.tenant = parts[2].split('.')[0]
+        if len(parts) > 2:
+            self.tenant = parts[2].split('.')[0]
+        else:
+            self.tenant = None
 
     def authenticate(self) -> str:
         """
-        Authenticate and get access token.
+        Authenticate using the specified method.
 
         Returns:
-            Access token string
+            Success message or access token string
         """
-        if self.access_token:
+        # Set common headers
+        self.session.headers.update({
+            'Accept': 'application/json;odata=verbose',
+            'Content-Type': 'application/json;odata=verbose'
+        })
+
+        if self.auth_method == "ntlm":
+            # Windows Authentication (NTLM)
+            if not self.username or not self.password:
+                raise ValueError("Username and password required for NTLM authentication")
+
+            self.session.auth = HttpNtlmAuth(self.username, self.password)
+            self._test_connection()
+            return "NTLM authenticated"
+
+        elif self.auth_method == "basic":
+            # Basic Authentication
+            if not self.username or not self.password:
+                raise ValueError("Username and password required for Basic authentication")
+
+            self.session.auth = (self.username, self.password)
+            self._test_connection()
+            return "Basic auth authenticated"
+
+        elif self.auth_method == "token" and self.access_token:
             # Use provided access token
             self.session.headers.update({
-                'Authorization': f'Bearer {self.access_token}',
-                'Accept': 'application/json;odata=verbose',
-                'Content-Type': 'application/json;odata=verbose'
+                'Authorization': f'Bearer {self.access_token}'
             })
-            # Test the token
             self._test_connection()
             return self.access_token
 
-        elif self.client_id and self.client_secret and self.tenant_id:
+        elif self.auth_method == "oauth" and self.client_id and self.client_secret and self.tenant_id:
             # OAuth2 Client Credentials Flow
             token_url = f"https://accounts.accesscontrol.windows.net/{self.tenant_id}/tokens/OAuth/2"
 
@@ -78,16 +113,14 @@ class SharePointClient:
                 self.access_token = token_data['access_token']
 
                 self.session.headers.update({
-                    'Authorization': f'Bearer {self.access_token}',
-                    'Accept': 'application/json;odata=verbose',
-                    'Content-Type': 'application/json;odata=verbose'
+                    'Authorization': f'Bearer {self.access_token}'
                 })
 
                 return self.access_token
             else:
-                raise Exception(f"Authentication failed: {response.status_code} - {response.text}")
+                raise Exception(f"OAuth authentication failed: {response.status_code} - {response.text}")
         else:
-            raise ValueError("Either access_token or (client_id, client_secret, tenant_id) must be provided")
+            raise ValueError("Invalid authentication configuration. Please provide valid credentials for your chosen auth method.")
 
     def _test_connection(self):
         """Test the connection by making a simple API call."""
@@ -97,32 +130,76 @@ class SharePointClient:
         if response.status_code != 200:
             raise Exception(f"Connection test failed: {response.status_code} - {response.text}")
 
-    def get_files_in_folder(self, folder_path: str = "") -> List[Dict]:
+    def get_site_info(self) -> Dict:
+        """
+        Get information about the SharePoint site.
+
+        Returns:
+            Dictionary with site information
+        """
+        url = f"{self.site_url}/_api/web"
+        response = self.session.get(url)
+
+        if response.status_code != 200:
+            raise Exception(f"Failed to get site info: {response.status_code} - {response.text}")
+
+        data = response.json()
+
+        if 'd' in data:
+            web_data = data['d']
+            return {
+                'title': web_data.get('Title', ''),
+                'url': web_data.get('Url', ''),
+                'server_relative_url': web_data.get('ServerRelativeUrl', ''),
+                'description': web_data.get('Description', '')
+            }
+
+        return {}
+
+    def get_files_in_folder(self, folder_path: str = "", recursive: bool = False) -> List[Dict]:
         """
         Get all files in a SharePoint folder.
 
         Args:
-            folder_path: Relative folder path (e.g., "Shared Documents/Reports")
-                        Empty string for root document library
+            folder_path: Server-relative folder path or relative path
+                        Can be full path like "/sites/project/Document Library/Folder"
+                        or relative like "Document Library/Folder"
+            recursive: If True, also get files from subfolders
 
         Returns:
             List of file dictionaries with metadata
         """
-        # Default to Shared Documents if no path provided
+        # Handle empty path
         if not folder_path:
             folder_path = "Shared Documents"
 
-        # Encode folder path
-        encoded_path = requests.utils.quote(folder_path)
+        # If path doesn't start with /, it's relative - try to construct server-relative path
+        if not folder_path.startswith('/'):
+            # Get site's server relative URL
+            try:
+                site_info = self.get_site_info()
+                server_relative_url = site_info.get('server_relative_url', '')
+                # Construct full path
+                folder_path = f"{server_relative_url}/{folder_path}".replace('//', '/')
+            except:
+                # If we can't get site info, use path as-is
+                pass
+
+        # URL encode the path properly
+        # First, normalize the path
+        folder_path = folder_path.replace('\\', '/')
 
         # SharePoint REST API endpoint
+        # Use server-relative URL format
+        encoded_path = urllib.parse.quote(folder_path)
+
         url = f"{self.site_url}/_api/web/GetFolderByServerRelativeUrl('{encoded_path}')/Files"
         url += "?$expand=ListItemAllFields,ModifiedBy"
 
         response = self.session.get(url)
 
         if response.status_code == 404:
-            raise Exception(f"Folder not found: {folder_path}")
+            raise Exception(f"Folder not found: {folder_path}. Try using the full server-relative path (e.g., /sites/project/Document Library/Folder)")
         elif response.status_code != 200:
             raise Exception(f"Failed to get files: {response.status_code} - {response.text}")
 

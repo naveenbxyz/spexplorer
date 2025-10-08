@@ -14,16 +14,24 @@ st.sidebar.header("SharePoint Authentication")
 
 site_url = st.sidebar.text_input(
     "Site URL",
-    placeholder="https://yourtenant.sharepoint.com/sites/yoursite",
-    help="Enter your SharePoint site URL"
+    placeholder="https://teamsites.company.net/sites/project",
+    help="Enter your SharePoint site URL (full path to the site)"
 )
 
 auth_method = st.sidebar.selectbox(
     "Authentication Method",
-    ["Client Credentials (App Registration)", "Personal Access Token"]
+    ["Windows Authentication (NTLM)", "Basic Authentication", "Client Credentials (OAuth)", "Access Token"]
 )
 
-if auth_method == "Client Credentials (App Registration)":
+if auth_method in ["Windows Authentication (NTLM)", "Basic Authentication"]:
+    st.sidebar.info("💡 Use your Windows/domain credentials")
+    username = st.sidebar.text_input(
+        "Username",
+        placeholder="DOMAIN\\username or user@domain.com",
+        help="Enter your domain username"
+    )
+    password = st.sidebar.text_input("Password", type="password")
+elif auth_method == "Client Credentials (OAuth)":
     client_id = st.sidebar.text_input("Client ID", type="password")
     client_secret = st.sidebar.text_input("Client Secret", type="password")
     tenant_id = st.sidebar.text_input("Tenant ID", type="password")
@@ -53,24 +61,45 @@ if 'current_folder' not in st.session_state:
 if st.sidebar.button("Connect to SharePoint"):
     try:
         with st.spinner("Connecting to SharePoint..."):
-            if auth_method == "Client Credentials (App Registration)":
+            if auth_method == "Windows Authentication (NTLM)":
+                sp_client = SharePointClient(
+                    site_url=site_url,
+                    username=username,
+                    password=password,
+                    auth_method="ntlm"
+                )
+            elif auth_method == "Basic Authentication":
+                sp_client = SharePointClient(
+                    site_url=site_url,
+                    username=username,
+                    password=password,
+                    auth_method="basic"
+                )
+            elif auth_method == "Client Credentials (OAuth)":
                 sp_client = SharePointClient(
                     site_url=site_url,
                     client_id=client_id,
                     client_secret=client_secret,
-                    tenant_id=tenant_id
+                    tenant_id=tenant_id,
+                    auth_method="oauth"
                 )
-            else:
+            else:  # Access Token
                 sp_client = SharePointClient(
                     site_url=site_url,
-                    access_token=access_token
+                    access_token=access_token,
+                    auth_method="token"
                 )
 
-            # Test connection
+            # Test connection and get site info
             sp_client.authenticate()
+            site_info = sp_client.get_site_info()
+
             st.session_state.sp_client = sp_client
             st.session_state.authenticated = True
-            st.sidebar.success("✅ Connected successfully!")
+            st.session_state.site_info = site_info
+
+            st.sidebar.success(f"✅ Connected to: {site_info.get('title', 'SharePoint')}")
+            st.sidebar.info(f"📍 Site path: {site_info.get('server_relative_url', '')}")
     except Exception as e:
         st.sidebar.error(f"❌ Connection failed: {str(e)}")
         st.session_state.authenticated = False
@@ -79,8 +108,20 @@ if st.sidebar.button("Connect to SharePoint"):
 if st.session_state.authenticated:
     sp_client = st.session_state.sp_client
 
+    # Display site info
+    if 'site_info' in st.session_state:
+        site_info = st.session_state.site_info
+        st.info(f"📍 Connected to: **{site_info.get('title', 'SharePoint')}**  \nServer path: `{site_info.get('server_relative_url', '')}`")
+
     # Folder navigation
     st.header("📂 Browse Folders")
+
+    st.markdown("""
+    💡 **Path format tips:**
+    - Use full server-relative path: `/sites/project/subproject/Document Library/Folder`
+    - Or relative from site: `Document Library/Secure Area/Client Folders/Country`
+    - URL-encoded spaces are handled automatically
+    """)
 
     col1, col2 = st.columns([3, 1])
 
@@ -88,8 +129,8 @@ if st.session_state.authenticated:
         folder_path = st.text_input(
             "Folder Path",
             value=st.session_state.current_folder,
-            placeholder="Shared Documents/Reports",
-            help="Enter relative path from site (e.g., 'Shared Documents' or 'Shared Documents/Folder')"
+            placeholder="Document Library/Secure Area/Client Folders",
+            help="Enter server-relative path (e.g., '/sites/project/Document Library/Folder') or relative path"
         )
 
     with col2:
