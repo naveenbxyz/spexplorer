@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 from sharepoint_client import SharePointClient
 from excel_extractor import ExcelExtractor
+from concurrent_downloader import BatchDownloader
 import json
 from datetime import datetime
+import time
 
 st.set_page_config(page_title="SharePoint Excel Explorer", layout="wide")
 
@@ -189,24 +191,65 @@ if st.session_state.authenticated:
             is_recursive = search_mode == "Recursive (All Subfolders)"
 
             if is_recursive:
-                # Recursive search
+                # Recursive search with optional concurrent downloading
                 progress_placeholder = st.empty()
                 status_placeholder = st.empty()
+                download_status_placeholder = st.empty()
+
+                # Initialize downloader if persistence is enabled
+                downloader = None
+                if persist_files:
+                    downloader = BatchDownloader(
+                        sp_client=sp_client,
+                        output_folder=output_folder,
+                        batch_size=50  # Download every 50 files
+                    )
 
                 def progress_callback(current_folder, files_found, folders_processed):
-                    status_placeholder.info(f"🔄 Searching... Folders processed: {folders_processed} | Files found: {files_found}")
-                    progress_placeholder.text(f"Current: {current_folder}")
+                    status_text = f"🔄 Searching... Folders: {folders_processed} | Files found: {files_found}"
+
+                    # Add download status if persistence is enabled
+                    if downloader:
+                        dl_status = downloader.get_status()
+                        status_text += f" | Downloaded: {dl_status['downloaded']}"
+                        if dl_status['failed'] > 0:
+                            status_text += f" | Failed: {dl_status['failed']}"
+
+                    status_placeholder.info(status_text)
+                    progress_placeholder.text(f"📂 Current: {current_folder}")
+
+                def file_found_callback(file_info):
+                    """Called when each file is found - add to downloader"""
+                    if downloader:
+                        downloader.add_file(file_info)
 
                 with st.spinner("Starting recursive search..."):
                     excel_files = sp_client.search_files_recursive(
                         root_folder=st.session_state.current_folder,
                         filename_patterns=patterns if patterns else None,
                         file_extensions=['xlsx', 'xls'],
-                        progress_callback=progress_callback
+                        progress_callback=progress_callback,
+                        file_found_callback=file_found_callback if persist_files else None
                     )
+
+                # Finalize any remaining downloads
+                if downloader:
+                    with st.spinner("Finalizing downloads..."):
+                        downloader.finalize()
+
+                    dl_status = downloader.get_status()
+                    if dl_status['downloaded'] > 0:
+                        st.success(f"✅ Downloaded {dl_status['downloaded']} file(s) to: {output_folder}")
+
+                    if dl_status['failed'] > 0:
+                        st.warning(f"⚠️ Failed to download {dl_status['failed']} file(s)")
+                        with st.expander("Show download errors"):
+                            for error in dl_status['errors']:
+                                st.text(f"{error['filename']}: {error['error']}")
 
                 progress_placeholder.empty()
                 status_placeholder.empty()
+                download_status_placeholder.empty()
 
             else:
                 # Single folder search
@@ -267,78 +310,13 @@ if st.session_state.authenticated:
                     mime="text/csv"
                 )
 
-                # File persistence section
-                if persist_files:
-                    st.subheader("💾 Download & Save Files")
-
-                    if st.button("📥 Download All Matching Files", type="primary"):
-                        import os
-                        import re
-                        from pathlib import Path
-
-                        # Create output folder if it doesn't exist
-                        output_path = Path(output_folder)
-                        output_path.mkdir(parents=True, exist_ok=True)
-
-                        # Progress tracking
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                        success_count = 0
-                        error_count = 0
-                        error_files = []
-
-                        for idx, file in enumerate(excel_files):
-                            try:
-                                # Update progress
-                                progress = (idx + 1) / len(excel_files)
-                                progress_bar.progress(progress)
-                                status_text.text(f"Downloading {idx + 1}/{len(excel_files)}: {file['name']}")
-
-                                # Create folder structure to preserve hierarchy
-                                relative_folder = file.get('relative_folder', 'root')
-                                if relative_folder == '(current)' or relative_folder == '(root)':
-                                    relative_folder = 'root'
-
-                                # Sanitize folder path
-                                safe_folder = re.sub(r'[<>:"|?*]', '_', relative_folder)
-                                file_output_path = output_path / safe_folder
-
-                                # Create subfolder
-                                file_output_path.mkdir(parents=True, exist_ok=True)
-
-                                # Download file
-                                file_content = sp_client.download_file(file['server_relative_url'])
-
-                                # Save file
-                                full_file_path = file_output_path / file['name']
-                                with open(full_file_path, 'wb') as f:
-                                    f.write(file_content)
-
-                                success_count += 1
-
-                            except Exception as e:
-                                error_count += 1
-                                error_files.append(f"{file['name']}: {str(e)}")
-                                continue
-
-                        # Clear progress
-                        progress_bar.empty()
-                        status_text.empty()
-
-                        # Show results
-                        if success_count > 0:
-                            st.success(f"✅ Successfully downloaded {success_count} file(s) to: {output_folder}")
-
-                            # Save metadata
-                            metadata_file = output_path / f"metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                            df.to_csv(metadata_file, index=False)
-                            st.info(f"📋 Metadata saved to: {metadata_file}")
-
-                        if error_count > 0:
-                            st.warning(f"⚠️ Failed to download {error_count} file(s)")
-                            with st.expander("Show errors"):
-                                for error in error_files:
-                                    st.text(error)
+                # Save metadata if files were persisted
+                if persist_files and len(excel_files) > 0:
+                    from pathlib import Path
+                    output_path = Path(output_folder)
+                    metadata_file = output_path / f"metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    df.to_csv(metadata_file, index=False)
+                    st.info(f"📋 Metadata saved to: {metadata_file}")
 
                 # File selection for content extraction
                 st.subheader("📄 Extract File Content")

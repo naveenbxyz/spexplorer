@@ -335,7 +335,8 @@ class SharePointClient:
         root_folder: str,
         filename_patterns: List[str] = None,
         file_extensions: List[str] = None,
-        progress_callback=None
+        progress_callback=None,
+        file_found_callback=None
     ) -> List[Dict]:
         """
         Recursively search for files in a folder and all subfolders.
@@ -345,6 +346,7 @@ class SharePointClient:
             filename_patterns: List of patterns to match in filename (case-insensitive)
             file_extensions: List of file extensions to filter (e.g., ['xlsx', 'xls'])
             progress_callback: Optional callback function(current_folder, files_found, folders_processed)
+            file_found_callback: Optional callback function(file_info) called when each file is found
 
         Returns:
             List of matching file dictionaries with full metadata
@@ -403,6 +405,10 @@ class SharePointClient:
                         file['relative_folder'] = current_folder
 
                     all_matching_files.append(file)
+
+                    # Call file_found_callback if provided (for concurrent downloading)
+                    if file_found_callback:
+                        file_found_callback(file)
 
                 # Get subfolders and add to queue
                 subfolders = self.get_folders_in_folder(current_folder)
