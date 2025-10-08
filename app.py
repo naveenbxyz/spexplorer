@@ -38,6 +38,14 @@ elif auth_method == "Client Credentials (OAuth)":
 else:
     access_token = st.sidebar.text_input("Access Token", type="password")
 
+# SSL verification option
+st.sidebar.header("Connection Options")
+verify_ssl = st.sidebar.checkbox(
+    "Verify SSL Certificate",
+    value=True,
+    help="Uncheck for self-signed certificates (internal SharePoint)"
+)
+
 # File pattern filter
 st.sidebar.header("File Filters")
 pattern_input = st.sidebar.text_input(
@@ -66,14 +74,16 @@ if st.sidebar.button("Connect to SharePoint"):
                     site_url=site_url,
                     username=username,
                     password=password,
-                    auth_method="ntlm"
+                    auth_method="ntlm",
+                    verify_ssl=verify_ssl
                 )
             elif auth_method == "Basic Authentication":
                 sp_client = SharePointClient(
                     site_url=site_url,
                     username=username,
                     password=password,
-                    auth_method="basic"
+                    auth_method="basic",
+                    verify_ssl=verify_ssl
                 )
             elif auth_method == "Client Credentials (OAuth)":
                 sp_client = SharePointClient(
@@ -81,13 +91,15 @@ if st.sidebar.button("Connect to SharePoint"):
                     client_id=client_id,
                     client_secret=client_secret,
                     tenant_id=tenant_id,
-                    auth_method="oauth"
+                    auth_method="oauth",
+                    verify_ssl=verify_ssl
                 )
             else:  # Access Token
                 sp_client = SharePointClient(
                     site_url=site_url,
                     access_token=access_token,
-                    auth_method="token"
+                    auth_method="token",
+                    verify_ssl=verify_ssl
                 )
 
             # Test connection and get site info

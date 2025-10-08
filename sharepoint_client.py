@@ -21,7 +21,8 @@ class SharePointClient:
         access_token: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
-        auth_method: str = "oauth"
+        auth_method: str = "oauth",
+        verify_ssl: bool = True
     ):
         """
         Initialize SharePoint client.
@@ -35,6 +36,7 @@ class SharePointClient:
             username: Username for NTLM/Basic auth
             password: Password for NTLM/Basic auth
             auth_method: Authentication method - "oauth", "token", "ntlm", "basic"
+            verify_ssl: Verify SSL certificates (default True, set False for self-signed certs)
         """
         self.site_url = site_url.rstrip('/')
         self.client_id = client_id
@@ -44,7 +46,13 @@ class SharePointClient:
         self.username = username
         self.password = password
         self.auth_method = auth_method.lower()
+        self.verify_ssl = verify_ssl
         self.session = requests.Session()
+
+        # Disable SSL warnings if verify is False
+        if not verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
         # Extract tenant and site info
         parts = site_url.split('/')
@@ -125,7 +133,7 @@ class SharePointClient:
     def _test_connection(self):
         """Test the connection by making a simple API call."""
         url = f"{self.site_url}/_api/web"
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Connection test failed: {response.status_code} - {response.text}")
@@ -138,7 +146,7 @@ class SharePointClient:
             Dictionary with site information
         """
         url = f"{self.site_url}/_api/web"
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Failed to get site info: {response.status_code} - {response.text}")
@@ -196,7 +204,7 @@ class SharePointClient:
         url = f"{self.site_url}/_api/web/GetFolderByServerRelativeUrl('{encoded_path}')/Files"
         url += "?$expand=ListItemAllFields,ModifiedBy"
 
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code == 404:
             raise Exception(f"Folder not found: {folder_path}. Try using the full server-relative path (e.g., /sites/project/Document Library/Folder)")
@@ -238,7 +246,7 @@ class SharePointClient:
         encoded_path = requests.utils.quote(folder_path)
         url = f"{self.site_url}/_api/web/GetFolderByServerRelativeUrl('{encoded_path}')/Folders"
 
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Failed to get folders: {response.status_code} - {response.text}")
@@ -271,7 +279,7 @@ class SharePointClient:
         encoded_url = requests.utils.quote(server_relative_url)
         url = f"{self.site_url}/_api/web/GetFileByServerRelativeUrl('{encoded_url}')/$value"
 
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Failed to download file: {response.status_code} - {response.text}")
@@ -299,7 +307,7 @@ class SharePointClient:
         encoded_query = requests.utils.quote(search_query)
         url = f"{self.site_url}/_api/search/query?querytext='{encoded_query}'"
 
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Search failed: {response.status_code} - {response.text}")
@@ -364,7 +372,7 @@ class SharePointClient:
         encoded_list = requests.utils.quote(list_name)
         url = f"{self.site_url}/_api/web/lists/getbytitle('{encoded_list}')/items"
 
-        response = self.session.get(url)
+        response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code != 200:
             raise Exception(f"Failed to get list items: {response.status_code} - {response.text}")

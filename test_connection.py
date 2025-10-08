@@ -16,6 +16,13 @@ def test_connection():
     # Get connection details
     site_url = input("\nEnter SharePoint Site URL: ").strip()
 
+    # SSL verification option
+    verify_ssl_input = input("\nVerify SSL certificate? (y/n) [y]: ").strip().lower()
+    verify_ssl = verify_ssl_input != 'n'
+
+    if not verify_ssl:
+        print("⚠️  SSL verification disabled (useful for self-signed certificates)")
+
     print("\nAuthentication Methods:")
     print("1. Windows Authentication (NTLM)")
     print("2. Basic Authentication")
@@ -38,7 +45,8 @@ def test_connection():
                 site_url=site_url,
                 username=username,
                 password=password,
-                auth_method=auth_method
+                auth_method=auth_method,
+                verify_ssl=verify_ssl
             )
 
         elif auth_choice == "3":
@@ -54,7 +62,8 @@ def test_connection():
                 client_id=client_id,
                 client_secret=client_secret,
                 tenant_id=tenant_id,
-                auth_method="oauth"
+                auth_method="oauth",
+                verify_ssl=verify_ssl
             )
 
         elif auth_choice == "4":
@@ -66,6 +75,7 @@ def test_connection():
             client = SharePointClient(
                 site_url=site_url,
                 access_token=access_token,
+                verify_ssl=verify_ssl,
                 auth_method="token"
             )
 
