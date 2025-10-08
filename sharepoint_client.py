@@ -166,6 +166,9 @@ class SharePointClient:
     def _test_connection(self):
         """Test the connection by making a simple API call."""
         url = f"{self.site_url}/_api/web"
+
+        print(f"DEBUG: Testing connection to: {url}")  # Debug output
+
         response = self.session.get(url, verify=self.verify_ssl)
 
         if response.status_code == 401:
@@ -176,9 +179,24 @@ class SharePointClient:
                 error_msg += "  - Password is correct\n"
                 error_msg += "  - Account has access to SharePoint site\n"
                 error_msg += f"  - Attempted username: {self.username}"
+            elif self.auth_method == "integrated":
+                error_msg += "Please check:\n"
+                error_msg += "  - You're logged into Windows domain\n"
+                error_msg += "  - VPN is connected (if required)\n"
+                error_msg += "  - Your account has access to SharePoint site"
+            raise Exception(error_msg)
+        elif response.status_code == 404:
+            error_msg = f"REST API endpoint not found (404). \n"
+            error_msg += f"URL attempted: {url}\n"
+            error_msg += "Possible issues:\n"
+            error_msg += "  - Site URL may be incorrect\n"
+            error_msg += "  - REST API may be disabled\n"
+            error_msg += "  - Site may be a subsite (try parent site URL)\n"
+            error_msg += f"\nYour site URL: {self.site_url}\n"
+            error_msg += "Try using just the site collection URL (e.g., https://server/sites/sitename)"
             raise Exception(error_msg)
         elif response.status_code != 200:
-            raise Exception(f"Connection test failed: {response.status_code} - {response.text if response.text else 'No error message'}")
+            raise Exception(f"Connection test failed: {response.status_code} - {response.text if response.text else 'No error message'}\nURL: {url}")
 
     def get_site_info(self) -> Dict:
         """
@@ -298,14 +316,105 @@ class SharePointClient:
 
         if 'd' in data and 'results' in data['d']:
             for item in data['d']['results']:
+                # Skip system folders
+                folder_name = item['Name']
+                if folder_name.startswith('_') or folder_name == 'Forms':
+                    continue
+
                 folder_info = {
-                    'name': item['Name'],
+                    'name': folder_name,
                     'server_relative_url': item['ServerRelativeUrl'],
                     'item_count': item.get('ItemCount', 0)
                 }
                 folders.append(folder_info)
 
         return folders
+
+    def search_files_recursive(
+        self,
+        root_folder: str,
+        filename_patterns: List[str] = None,
+        file_extensions: List[str] = None,
+        progress_callback=None
+    ) -> List[Dict]:
+        """
+        Recursively search for files in a folder and all subfolders.
+
+        Args:
+            root_folder: Starting folder path (relative or server-relative)
+            filename_patterns: List of patterns to match in filename (case-insensitive)
+            file_extensions: List of file extensions to filter (e.g., ['xlsx', 'xls'])
+            progress_callback: Optional callback function(current_folder, files_found, folders_processed)
+
+        Returns:
+            List of matching file dictionaries with full metadata
+        """
+        all_matching_files = []
+        folders_to_process = [root_folder]
+        folders_processed = 0
+
+        # Normalize root folder path to server-relative
+        if not root_folder.startswith('/'):
+            try:
+                site_info = self.get_site_info()
+                server_relative_url = site_info.get('server_relative_url', '')
+                root_folder_full = f"{server_relative_url}/{root_folder}".replace('//', '/')
+            except:
+                root_folder_full = root_folder
+        else:
+            root_folder_full = root_folder
+
+        while folders_to_process:
+            current_folder = folders_to_process.pop(0)
+            folders_processed += 1
+
+            if progress_callback:
+                progress_callback(current_folder, len(all_matching_files), folders_processed)
+
+            try:
+                # Get files in current folder
+                files = self.get_files_in_folder(current_folder)
+
+                # Filter files
+                for file in files:
+                    # Check file extension
+                    if file_extensions:
+                        if not any(file['name'].lower().endswith(f'.{ext.lower()}') for ext in file_extensions):
+                            continue
+
+                    # Check filename patterns
+                    if filename_patterns:
+                        match_found = False
+                        for pattern in filename_patterns:
+                            if pattern.upper() in file['name'].upper():
+                                match_found = True
+                                break
+                        if not match_found:
+                            continue
+
+                    # Add folder path information
+                    file['folder_path'] = current_folder
+
+                    # Extract relative path from root folder for display
+                    if current_folder.startswith(root_folder_full):
+                        relative_path = current_folder[len(root_folder_full):].strip('/')
+                        file['relative_folder'] = relative_path if relative_path else '(root)'
+                    else:
+                        file['relative_folder'] = current_folder
+
+                    all_matching_files.append(file)
+
+                # Get subfolders and add to queue
+                subfolders = self.get_folders_in_folder(current_folder)
+                for subfolder in subfolders:
+                    folders_to_process.append(subfolder['server_relative_url'])
+
+            except Exception as e:
+                # Log error but continue with other folders
+                print(f"Warning: Could not process folder {current_folder}: {str(e)}")
+                continue
+
+        return all_matching_files
 
     def download_file(self, server_relative_url: str) -> bytes:
         """

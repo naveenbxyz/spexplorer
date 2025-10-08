@@ -135,117 +135,167 @@ if st.session_state.authenticated:
         site_info = st.session_state.site_info
         st.info(f"📍 Connected to: **{site_info.get('title', 'SharePoint')}**  \nServer path: `{site_info.get('server_relative_url', '')}`")
 
-    # Folder navigation
-    st.header("📂 Browse Folders")
+    # Search mode selection
+    st.header("🔍 Search for Excel Files")
+
+    search_mode = st.radio(
+        "Search Mode",
+        ["Current Folder Only", "Recursive (All Subfolders)"],
+        horizontal=True,
+        help="Choose whether to search only the specified folder or include all subfolders"
+    )
 
     st.markdown("""
     💡 **Path format tips:**
-    - Use full server-relative path: `/sites/project/subproject/Document Library/Folder`
-    - Or relative from site: `Document Library/Secure Area/Client Folders/Country`
+    - Use relative from site: `Document Library/Secure Area/Client Folders`
+    - Or full server-relative path: `/sites/XXProducts/XX/Document Library/Secure Area/Client Folders`
     - URL-encoded spaces are handled automatically
     """)
+
+    folder_path = st.text_input(
+        "Folder Path",
+        value=st.session_state.current_folder if st.session_state.current_folder else "Document Library/Secure Area/Client Folders",
+        placeholder="Document Library/Secure Area/Client Folders",
+        help="Enter the root folder path to search"
+    )
 
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        folder_path = st.text_input(
-            "Folder Path",
-            value=st.session_state.current_folder,
-            placeholder="Document Library/Secure Area/Client Folders",
-            help="Enter server-relative path (e.g., '/sites/project/Document Library/Folder') or relative path"
-        )
+        if st.button("🔍 Search for Files", use_container_width=True, type="primary"):
+            st.session_state.current_folder = folder_path
+            st.session_state.trigger_search = True
 
     with col2:
         if st.button("📁 Browse Folder", use_container_width=True):
             st.session_state.current_folder = folder_path
+            st.session_state.trigger_search = False
 
-    if st.session_state.current_folder or st.button("Load Root Folder"):
+    if st.session_state.get('trigger_search') or (st.session_state.current_folder and not st.session_state.get('trigger_search') == False):
         try:
-            with st.spinner("Loading files..."):
-                # Get files from SharePoint
-                files = sp_client.get_files_in_folder(st.session_state.current_folder)
+            is_recursive = search_mode == "Recursive (All Subfolders)"
 
-                # Filter Excel files
-                excel_files = [f for f in files if f['name'].endswith(('.xlsx', '.xls'))]
+            if is_recursive:
+                # Recursive search
+                progress_placeholder = st.empty()
+                status_placeholder = st.empty()
 
-                # Apply pattern filtering
-                if patterns:
-                    filtered_files = []
-                    for file in excel_files:
-                        if any(pattern.upper() in file['name'].upper() for pattern in patterns):
-                            filtered_files.append(file)
-                    excel_files = filtered_files
+                def progress_callback(current_folder, files_found, folders_processed):
+                    status_placeholder.info(f"🔄 Searching... Folders processed: {folders_processed} | Files found: {files_found}")
+                    progress_placeholder.text(f"Current: {current_folder}")
 
-                if excel_files:
-                    st.success(f"Found {len(excel_files)} Excel file(s) matching criteria")
-
-                    # Display files in a table
-                    st.subheader("📊 Matching Files")
-
-                    # Prepare data for display
-                    file_data = []
-                    for file in excel_files:
-                        file_data.append({
-                            "Filename": file['name'],
-                            "Modified": file['modified'],
-                            "Size (KB)": round(file['size'] / 1024, 2),
-                            "Modified By": file.get('modified_by', 'N/A'),
-                            "URL": file['url']
-                        })
-
-                    df = pd.DataFrame(file_data)
-
-                    # Display table
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-
-                    # File selection for content extraction
-                    st.subheader("📄 Extract File Content")
-
-                    selected_file = st.selectbox(
-                        "Select a file to extract",
-                        options=[f['name'] for f in excel_files],
-                        key="file_selector"
+                with st.spinner("Starting recursive search..."):
+                    excel_files = sp_client.search_files_recursive(
+                        root_folder=st.session_state.current_folder,
+                        filename_patterns=patterns if patterns else None,
+                        file_extensions=['xlsx', 'xls'],
+                        progress_callback=progress_callback
                     )
 
-                    col1, col2 = st.columns(2)
+                progress_placeholder.empty()
+                status_placeholder.empty()
 
-                    with col1:
-                        if st.button("🔍 Extract to JSON", use_container_width=True):
-                            try:
-                                with st.spinner(f"Extracting content from {selected_file}..."):
-                                    # Find selected file
-                                    selected_file_obj = next(f for f in excel_files if f['name'] == selected_file)
+            else:
+                # Single folder search
+                with st.spinner("Loading files..."):
+                    files = sp_client.get_files_in_folder(st.session_state.current_folder)
 
-                                    # Download file content
-                                    file_content = sp_client.download_file(selected_file_obj['server_relative_url'])
+                    # Filter Excel files
+                    excel_files = [f for f in files if f['name'].endswith(('.xlsx', '.xls'))]
 
-                                    # Extract to JSON
-                                    extractor = ExcelExtractor()
-                                    json_data = extractor.extract_to_json(file_content, selected_file)
+                    # Apply pattern filtering
+                    if patterns:
+                        filtered_files = []
+                        for file in excel_files:
+                            if any(pattern.upper() in file['name'].upper() for pattern in patterns):
+                                filtered_files.append(file)
+                        excel_files = filtered_files
 
-                                    st.session_state.extracted_json = json_data
-                                    st.session_state.extracted_filename = selected_file
-                                    st.success("✅ Content extracted successfully!")
-                            except Exception as e:
-                                st.error(f"❌ Extraction failed: {str(e)}")
+                    # Add folder_path for consistency
+                    for file in excel_files:
+                        file['folder_path'] = st.session_state.current_folder
+                        file['relative_folder'] = '(current)'
 
-                    # Display extracted JSON
-                    if 'extracted_json' in st.session_state:
-                        st.subheader(f"📋 Extracted Data: {st.session_state.extracted_filename}")
+            if excel_files:
+                st.success(f"✅ Found {len(excel_files)} Excel file(s) matching criteria")
 
-                        # Display as formatted JSON
-                        st.json(st.session_state.extracted_json)
+                # Display files in a table
+                st.subheader("📊 Matching Files")
 
-                        # Download button
-                        json_str = json.dumps(st.session_state.extracted_json, indent=2)
-                        st.download_button(
-                            label="⬇️ Download JSON",
-                            data=json_str,
-                            file_name=f"{st.session_state.extracted_filename.rsplit('.', 1)[0]}.json",
-                            mime="application/json"
-                        )
-                else:
-                    st.warning("No Excel files found matching the specified patterns.")
+                # Prepare data for display
+                file_data = []
+                for file in excel_files:
+                    file_data.append({
+                        "Filename": file['name'],
+                        "Folder": file.get('relative_folder', 'N/A'),
+                        "Full Path": file.get('folder_path', 'N/A'),
+                        "Modified": file['modified'],
+                        "Size (KB)": round(file['size'] / 1024, 2),
+                        "Modified By": file.get('modified_by', 'N/A')
+                    })
+
+                df = pd.DataFrame(file_data)
+
+                # Display table
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+                # Export to CSV
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Results as CSV",
+                    data=csv,
+                    file_name=f"sharepoint_files_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+
+                # File selection for content extraction
+                st.subheader("📄 Extract File Content")
+
+                selected_file = st.selectbox(
+                    "Select a file to extract",
+                    options=[f['name'] for f in excel_files],
+                    key="file_selector"
+                )
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if st.button("🔍 Extract to JSON", use_container_width=True):
+                        try:
+                            with st.spinner(f"Extracting content from {selected_file}..."):
+                                # Find selected file
+                                selected_file_obj = next(f for f in excel_files if f['name'] == selected_file)
+
+                                # Download file content
+                                file_content = sp_client.download_file(selected_file_obj['server_relative_url'])
+
+                                # Extract to JSON
+                                extractor = ExcelExtractor()
+                                json_data = extractor.extract_to_json(file_content, selected_file)
+
+                                st.session_state.extracted_json = json_data
+                                st.session_state.extracted_filename = selected_file
+                                st.success("✅ Content extracted successfully!")
+                        except Exception as e:
+                            st.error(f"❌ Extraction failed: {str(e)}")
+
+                # Display extracted JSON
+                if 'extracted_json' in st.session_state:
+                    st.subheader(f"📋 Extracted Data: {st.session_state.extracted_filename}")
+
+                    # Display as formatted JSON
+                    st.json(st.session_state.extracted_json)
+
+                    # Download button
+                    json_str = json.dumps(st.session_state.extracted_json, indent=2)
+                    st.download_button(
+                        label="⬇️ Download JSON",
+                        data=json_str,
+                        file_name=f"{st.session_state.extracted_filename.rsplit('.', 1)[0]}.json",
+                        mime="application/json"
+                    )
+            else:
+                st.warning("No Excel files found matching the specified patterns.")
 
         except Exception as e:
             st.error(f"❌ Error loading files: {str(e)}")

@@ -1,15 +1,17 @@
 # SharePoint Excel Explorer
 
-A Streamlit application for browsing SharePoint folders, filtering Excel files by patterns, and extracting their content to generic JSON format.
+A Streamlit application for recursively browsing SharePoint folders, finding Excel files matching specific patterns, and extracting their content to generic JSON format.
 
 ## Features
 
-- 🔐 **SharePoint Authentication**: Supports both OAuth2 (Client Credentials) and Access Token methods
-- 📁 **Folder Navigation**: Browse SharePoint document libraries and folders
-- 🔍 **Pattern Filtering**: Filter Excel files by filename patterns (e.g., files containing "XX", "YY", etc.)
-- 📊 **File Metadata**: View file size, modified date, and author information
+- 🔐 **Windows Integrated Authentication**: Uses your current Windows login (no password needed!)
+- 🔐 **Multiple Auth Methods**: NTLM, Basic Auth, OAuth2, and Access Token support
+- 🔍 **Recursive Search**: Search through entire folder hierarchies including all subfolders
+- 📁 **Pattern Matching**: Find Excel files by filename patterns (e.g., containing "GGGG", "PPPP", etc.)
+- 📊 **Full Path Tracking**: See complete folder paths for each file (Country/Client/Subfolder)
 - 📄 **Generic JSON Extraction**: Convert polymorphic Excel files to a standard JSON format
-- ⬇️ **Download Results**: Export extracted data as JSON files
+- 📥 **Export Results**: Download search results as CSV or extracted data as JSON
+- ⚡ **Progress Tracking**: Real-time updates during recursive folder scanning
 
 ## Installation
 
@@ -18,6 +20,11 @@ A Streamlit application for browsing SharePoint folders, filtering Excel files b
 2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
+   ```
+
+3. **For Windows Integrated Authentication (Recommended for internal SharePoint)**:
+   ```bash
+   pip install requests-negotiate-sspi
    ```
 
 ## SharePoint Authentication Setup
@@ -48,25 +55,40 @@ Use an existing SharePoint access token obtained through other means.
 
 ## Usage
 
-1. **Run the Streamlit app**:
+### Quick Start (For Internal SharePoint)
+
+1. **Find your correct Site URL**:
+   ```bash
+   python test_url_format.py
+   ```
+   This will help you identify the correct site URL (e.g., `https://teamsites.company.net/sites/XXProducts/XX`)
+
+2. **Run the Streamlit app**:
    ```bash
    streamlit run app.py
    ```
 
-2. **Configure SharePoint Connection**:
-   - Enter your SharePoint site URL (e.g., `https://yourtenant.sharepoint.com/sites/yoursite`)
-   - Choose authentication method and provide credentials
+3. **Connect to SharePoint**:
+   - **Site URL**: Enter your site URL (from step 1)
+   - **Authentication**: Select "Windows Integrated (Current User)" - no password needed!
+   - **Verify SSL Certificate**: Uncheck if you have self-signed certificates
    - Click "Connect to SharePoint"
 
-3. **Browse and Filter**:
-   - Enter a folder path (e.g., `Shared Documents/Reports`)
-   - Optionally add filename patterns to filter (e.g., `XX, YY, Report`)
-   - Click "Browse Folder"
+4. **Search for Files**:
+   - **Search Mode**: Choose "Recursive (All Subfolders)" to search entire hierarchy
+   - **Folder Path**: Enter root path (e.g., `Document Library/Secure Area/Client Folders`)
+   - **Filename Patterns**: Enter patterns to match (e.g., `GGGG, PPPP`)
+   - Click "🔍 Search for Files"
 
-4. **Extract Excel Content**:
-   - Select a file from the list
-   - Click "Extract to JSON"
-   - View the extracted data and download as JSON
+5. **View Results**:
+   - Browse files with full folder paths showing Country/Client/Subfolder structure
+   - See metadata: filename, folder location, modified date, size, modified by
+   - Download results as CSV for further analysis
+
+6. **Extract Excel Content** (Optional):
+   - Select any file from results
+   - Click "Extract to JSON" to convert Excel to generic JSON format
+   - Download the JSON data
 
 ## Troubleshooting Authentication (401 Error)
 
