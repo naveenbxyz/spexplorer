@@ -12,6 +12,11 @@ A Streamlit application for recursively browsing SharePoint folders, finding Exc
 - 📄 **Generic JSON Extraction**: Convert polymorphic Excel files to a standard JSON format
 - 📥 **Export Results**: Download search results as CSV or extracted data as JSON
 - ⚡ **Progress Tracking**: Real-time updates during recursive folder scanning
+- 🔬 **Batch Processing**: Automatically parse 1000+ Excel files and store in SQLite database
+- 🎯 **Table Detection**: Intelligently identifies table structures within Excel sheets
+- 📊 **Pattern Discovery**: Automatically detects and groups similar table structures
+- 🗄️ **SQLite Storage**: Efficient storage with folder hierarchy preservation (Country/Client/Product)
+- 📈 **Analytics Dashboard**: Analyze patterns across thousands of files
 
 ## Installation
 
@@ -118,7 +123,11 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions.
 spexplorer/
 ├── app.py                  # Main Streamlit application
 ├── sharepoint_client.py    # SharePoint REST API client
-├── excel_extractor.py      # Excel to JSON converter
+├── excel_extractor.py      # Basic Excel to JSON converter
+├── table_extractor.py      # Advanced table detection and extraction
+├── excel_database.py       # SQLite database manager
+├── batch_processor.py      # Batch processing engine
+├── concurrent_downloader.py # Concurrent file downloader
 ├── test_connection.py      # Connection test script
 ├── diagnose_auth.py        # Authentication diagnostics
 ├── requirements.txt        # Python dependencies
@@ -201,6 +210,83 @@ The extractor handles Excel files with varying structures:
 
 This application uses the SharePoint REST API. For more information:
 - [SharePoint REST API Overview](https://learn.microsoft.com/en-us/sharepoint/dev/sp-add-ins/get-to-know-the-sharepoint-rest-service)
+
+## Batch Processing & Pattern Discovery
+
+### Process Downloaded Files
+
+After downloading files from SharePoint, you can batch process them to identify table structures:
+
+1. **Navigate to the "Excel File Processing" section** in the app
+2. **Click "Start Batch Processing"** to parse all downloaded Excel files
+3. **View results** in the Analysis and Pattern Discovery tabs
+
+### Command-Line Batch Processing
+
+You can also process files from the command line:
+
+```bash
+python batch_processor.py ./output --db excel_data.db
+```
+
+This will:
+- Scan all Excel files in `./output` folder and subfolders
+- Extract table structures from each file
+- Store results in `excel_data.db` SQLite database
+- Preserve folder hierarchy (Country/Client/Product)
+- Generate pattern signatures for similar tables
+
+### Database Schema
+
+The SQLite database contains:
+
+- **files**: File metadata with folder structure (country/client/product)
+- **sheets**: Sheet-level information
+- **tables**: Individual table data with full JSON content
+- **pattern_analysis**: Aggregated pattern statistics
+
+### Pattern Discovery
+
+The system automatically:
+- Detects table boundaries within sheets (handles multiple tables per sheet)
+- Identifies header rows
+- Generates pattern signatures based on column structure
+- Groups similar tables across files
+- Tracks pattern frequency and distribution
+
+### Querying the Database
+
+You can query the database directly using SQL:
+
+```python
+from excel_database import ExcelDatabase
+
+db = ExcelDatabase("excel_data.db")
+
+# Get all files by country
+db.cursor.execute("SELECT * FROM files WHERE folder_country = 'USA'")
+
+# Find tables with specific headers
+results = db.search_tables_by_header("Customer_Name")
+
+# Get pattern summary
+patterns = db.get_pattern_summary()
+
+# Get folder statistics
+folder_stats = db.get_folder_summary()
+
+db.close()
+```
+
+### Use Cases
+
+**Pattern Analysis**: Identify common table structures across 1000+ client onboarding forms
+
+**Data Validation**: Find files with missing or inconsistent table structures
+
+**Automated Processing**: Build ETL pipelines based on discovered patterns
+
+**Compliance Auditing**: Track which clients/countries use which form versions
 
 ## Requirements
 

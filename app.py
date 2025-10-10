@@ -3,9 +3,12 @@ import pandas as pd
 from sharepoint_client import SharePointClient
 from excel_extractor import ExcelExtractor
 from concurrent_downloader import BatchDownloader
+from batch_processor import BatchProcessor
+from excel_database import ExcelDatabase
 import json
 from datetime import datetime
 import time
+from pathlib import Path
 
 st.set_page_config(page_title="SharePoint Excel Explorer", layout="wide")
 
@@ -370,6 +373,226 @@ if st.session_state.authenticated:
         except Exception as e:
             st.error(f"❌ Error loading files: {str(e)}")
             st.exception(e)
+    # Excel Processing Section
+    st.header("🔬 Excel File Processing")
+
+    process_tab, analyze_tab, patterns_tab = st.tabs(["📊 Process Files", "📈 Analysis", "🔍 Pattern Discovery"])
+
+    with process_tab:
+        st.subheader("Batch Process Downloaded Files")
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            st.info(f"📁 Output folder: `{output_folder}`")
+
+            if Path(output_folder).exists():
+                # Count files
+                excel_files = list(Path(output_folder).rglob("*.xlsx")) + list(Path(output_folder).rglob("*.xls"))
+                st.metric("Excel files in folder", len(excel_files))
+            else:
+                st.warning("Output folder does not exist yet. Download files first.")
+
+        with col2:
+            db_path = st.text_input("Database path", value="excel_data.db")
+
+        reprocess = st.checkbox(
+            "Reprocess already processed files",
+            value=False,
+            help="Check this to reprocess files that have already been parsed"
+        )
+
+        if st.button("🚀 Start Batch Processing", type="primary", use_container_width=True):
+            if not Path(output_folder).exists():
+                st.error("Output folder does not exist. Please download files first.")
+            else:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                stats_placeholder = st.empty()
+
+                def progress_callback(info):
+                    phase = info.get('phase')
+
+                    if phase == 'discovery':
+                        status_text.info(f"📂 {info['message']}")
+
+                    elif phase == 'processing_start':
+                        status_text.info(f"🔄 {info['message']}")
+
+                    elif phase == 'processing':
+                        current = info['current']
+                        total = info['total']
+                        progress = current / total if total > 0 else 0
+                        progress_bar.progress(progress)
+
+                        filename = info['filename']
+                        status = info['status']
+                        status_icon = '✅' if status == 'success' else '❌'
+
+                        status_text.text(f"{status_icon} [{current}/{total}] {filename}")
+
+                        # Update stats
+                        stats = info.get('stats', {})
+                        col1, col2, col3 = stats_placeholder.columns(3)
+                        col1.metric("Processed", stats.get('processed', 0))
+                        col2.metric("Failed", stats.get('failed', 0))
+                        col3.metric("Progress", f"{int(progress * 100)}%")
+
+                    elif phase == 'completed':
+                        status_text.success("✨ Processing completed!")
+                        progress_bar.progress(1.0)
+
+                try:
+                    with BatchProcessor(
+                        output_folder=output_folder,
+                        db_path=db_path,
+                        progress_callback=progress_callback
+                    ) as processor:
+                        processor.process_all(reprocess=reprocess)
+
+                        # Show final stats
+                        final_stats = processor.get_statistics()
+                        st.success("Processing complete!")
+
+                        db_stats = final_stats.get('database', {})
+
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Total Files", db_stats.get('total_files', 0))
+                        col2.metric("Total Sheets", db_stats.get('total_sheets', 0))
+                        col3.metric("Total Tables", db_stats.get('total_tables', 0))
+                        col4.metric("Unique Patterns", db_stats.get('unique_patterns', 0))
+
+                except Exception as e:
+                    st.error(f"Processing failed: {str(e)}")
+                    st.exception(e)
+
+    with analyze_tab:
+        st.subheader("Database Analysis")
+
+        if Path(db_path).exists():
+            try:
+                db = ExcelDatabase(db_path)
+
+                # Overall statistics
+                stats = db.get_statistics()
+
+                st.markdown("### 📊 Overall Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Files", stats.get('total_files', 0))
+                col2.metric("Processed", stats.get('processed_files', 0))
+                col3.metric("Pending", stats.get('pending_files', 0))
+                col4.metric("Failed", stats.get('failed_files', 0))
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Sheets", stats.get('total_sheets', 0))
+                col2.metric("Tables", stats.get('total_tables', 0))
+                col3.metric("Unique Patterns", stats.get('unique_patterns', 0))
+                col4.metric("Countries", stats.get('countries', 0))
+
+                # Folder summary
+                st.markdown("### 📁 Folder Structure Summary")
+                folder_summary = db.get_folder_summary()
+
+                if folder_summary:
+                    folder_df = pd.DataFrame(folder_summary)
+                    st.dataframe(folder_df, use_container_width=True, hide_index=True)
+
+                    # Download folder summary
+                    csv = folder_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Folder Summary",
+                        data=csv,
+                        file_name=f"folder_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No data available yet. Process files first.")
+
+                # Search functionality
+                st.markdown("### 🔍 Search Tables by Header")
+                search_header = st.text_input("Enter header name to search")
+
+                if search_header:
+                    results = db.search_tables_by_header(search_header)
+
+                    if results:
+                        st.success(f"Found {len(results)} table(s) with header '{search_header}'")
+
+                        results_df = pd.DataFrame(results)
+                        st.dataframe(results_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info(f"No tables found with header '{search_header}'")
+
+                db.close()
+
+            except Exception as e:
+                st.error(f"Error accessing database: {str(e)}")
+        else:
+            st.info("Database does not exist yet. Process files first.")
+
+    with patterns_tab:
+        st.subheader("Pattern Discovery")
+
+        if Path(db_path).exists():
+            try:
+                db = ExcelDatabase(db_path)
+
+                patterns = db.get_pattern_summary()
+
+                if patterns:
+                    st.markdown(f"### 🔍 Discovered {len(patterns)} Unique Table Patterns")
+
+                    for idx, pattern in enumerate(patterns):
+                        with st.expander(
+                            f"Pattern #{idx+1} - {pattern['occurrence_count']} occurrences",
+                            expanded=(idx < 3)  # Expand first 3
+                        ):
+                            col1, col2 = st.columns([1, 2])
+
+                            with col1:
+                                st.metric("Occurrences", pattern['occurrence_count'])
+                                st.text(f"First seen: {pattern['first_seen_date'][:10]}")
+                                st.text(f"Last seen: {pattern['last_seen_date'][:10]}")
+
+                            with col2:
+                                st.markdown("**Sample Headers:**")
+                                headers = pattern.get('sample_headers', [])
+                                if headers:
+                                    st.code(", ".join(headers[:10]))  # Show first 10 headers
+                                else:
+                                    st.text("No headers detected")
+
+                            st.text(f"Pattern signature: {pattern['pattern_signature']}")
+
+                    # Export patterns
+                    patterns_df = pd.DataFrame([
+                        {
+                            'pattern_signature': p['pattern_signature'],
+                            'occurrence_count': p['occurrence_count'],
+                            'headers': ', '.join(p.get('sample_headers', [])[:5]),
+                            'first_seen': p['first_seen_date'],
+                            'last_seen': p['last_seen_date']
+                        }
+                        for p in patterns
+                    ])
+
+                    csv = patterns_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Download Pattern Summary",
+                        data=csv,
+                        file_name=f"pattern_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.info("No patterns discovered yet. Process files first.")
+
+                db.close()
+
+            except Exception as e:
+                st.error(f"Error accessing database: {str(e)}")
+        else:
+            st.info("Database does not exist yet. Process files first.")
+
 else:
     st.info("👈 Please configure SharePoint connection in the sidebar and click 'Connect to SharePoint'")
 
@@ -397,4 +620,7 @@ else:
     - 📊 View file metadata (size, modified date, etc.)
     - 📄 Extract Excel content to generic JSON format
     - ⬇️ Download extracted JSON data
+    - 🔬 Batch process Excel files into SQLite database
+    - 📈 Analyze folder structure and patterns
+    - 🔍 Discover table patterns across files
     """)
