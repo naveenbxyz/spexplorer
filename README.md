@@ -1,6 +1,6 @@
 # SharePoint Excel Explorer
 
-A Streamlit application for recursively browsing SharePoint folders, finding Excel files matching specific patterns, and extracting their content to generic JSON format.
+A comprehensive solution for downloading, parsing, and analyzing 1000+ Excel files from SharePoint. Features client-centric data extraction, intelligent section detection, and ML-based pattern discovery.
 
 ## Features
 
@@ -60,18 +60,51 @@ Use an existing SharePoint access token obtained through other means.
 
 ## Usage
 
-### Quick Start (For Internal SharePoint)
+### Quick Start
 
-1. **Find your correct Site URL**:
-   ```bash
-   python test_url_format.py
-   ```
-   This will help you identify the correct site URL (e.g., `https://teamsites.company.net/sites/XXProducts/XX`)
+#### 1. Download Files from SharePoint
 
-2. **Run the Streamlit app**:
-   ```bash
-   streamlit run app.py
-   ```
+```bash
+streamlit run app.py
+```
+
+- Connect to SharePoint with your credentials
+- Enable "Download & Save Files" checkbox
+- Search recursively for Excel files
+- Files are saved to `./output` with folder structure preserved (Country/Client/Product)
+
+#### 2. Process Excel Files (Client-Centric Approach)
+
+**Option A: Using UI**
+```bash
+streamlit run client_browser.py
+```
+Click "Start Processing" to parse all files into client JSON documents.
+
+**Option B: Using Command Line**
+```bash
+python client_processor.py ./output --db client_data.db
+```
+
+This will:
+- Auto-select latest dated files per client (ignores old versions)
+- Skip folders containing "old" in path
+- Detect section types (key-value, table, complex headers)
+- Handle merged cells automatically
+- Generate searchable JSON per client
+- Store in SQLite database
+
+#### 3. Browse and Search Clients
+
+```bash
+streamlit run client_browser.py
+```
+
+Features:
+- Search by client name, country, product
+- View complete client JSON documents
+- Filter by pattern clusters
+- Download individual JSONs
 
 3. **Connect to SharePoint**:
    - **Site URL**: Enter your site URL (from step 1)
@@ -121,18 +154,26 @@ See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions.
 
 ```
 spexplorer/
-├── app.py                  # Main Streamlit application
-├── sharepoint_client.py    # SharePoint REST API client
-├── excel_extractor.py      # Basic Excel to JSON converter
-├── table_extractor.py      # Advanced table detection and extraction
-├── excel_database.py       # SQLite database manager
-├── batch_processor.py      # Batch processing engine
+├── app.py                   # SharePoint download UI
+├── client_browser.py        # Client search and browse UI (NEW)
+├── sharepoint_client.py     # SharePoint REST API client
 ├── concurrent_downloader.py # Concurrent file downloader
-├── test_connection.py      # Connection test script
-├── diagnose_auth.py        # Authentication diagnostics
-├── requirements.txt        # Python dependencies
-├── TROUBLESHOOTING.md      # Detailed troubleshooting guide
-└── README.md              # This file
+├── file_selector.py         # File selection with date logic (NEW)
+├── client_extractor.py      # Client-centric extraction (NEW)
+├── client_database.py       # Client SQLite database (NEW)
+├── client_processor.py      # Batch processor for clients (NEW)
+├── pattern_clustering.py    # ML-based pattern discovery (NEW)
+├── excel_extractor.py       # Legacy Excel to JSON converter
+├── table_extractor.py       # Legacy table detection
+├── excel_database.py        # Legacy database
+├── batch_processor.py       # Legacy batch processor
+├── test_connection.py       # Connection test script
+├── diagnose_auth.py         # Authentication diagnostics
+├── requirements.txt         # Python dependencies
+├── CLIENT_WORKFLOW.md       # Client-centric workflow guide (NEW)
+├── USAGE_GUIDE.md           # Detailed usage examples
+├── TROUBLESHOOTING.md       # Detailed troubleshooting guide
+└── README.md                # This file
 ```
 
 ## JSON Output Format
