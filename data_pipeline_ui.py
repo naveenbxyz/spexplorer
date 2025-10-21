@@ -15,6 +15,7 @@ import pandas as pd
 # Import existing modules
 from sharepoint_client import SharePointClient
 from concurrent_downloader import ConcurrentDownloader
+from client_processor import ClientProcessor
 from client_processor_robust import RobustClientProcessor
 from json_storage import JSONStorage
 from client_database import ClientDatabase
@@ -297,6 +298,15 @@ def stage_json_extraction():
             )
 
         with col2:
+            processing_mode = st.selectbox(
+                "Processing Engine",
+                [
+                    "Standard (ClientProcessor)",
+                    "Robust (with timeout)"
+                ],
+                help="Standard mode uses the latest ClientProcessor with detailed error reporting. Robust mode adds timeouts and retries."
+            )
+
             enable_sqlite = st.checkbox("Enable SQLite (optional)", value=True)
             db_path = st.text_input("SQLite DB Path", value="client_data.db") if enable_sqlite else None
 
@@ -308,21 +318,25 @@ def stage_json_extraction():
                 help="More workers = faster (but uses more CPU)"
             )
 
-            timeout_seconds = st.number_input(
-                "Timeout per file (seconds)",
-                min_value=30,
-                max_value=600,
-                value=120,
-                help="Maximum time to process each file (prevents hanging)"
-            )
+            timeout_seconds = None
+            max_retries = None
 
-            max_retries = st.number_input(
-                "Max retries for failed files",
-                min_value=0,
-                max_value=3,
-                value=1,
-                help="Number of retry attempts for failed files"
-            )
+            if processing_mode.startswith("Robust"):
+                timeout_seconds = st.number_input(
+                    "Timeout per file (seconds)",
+                    min_value=30,
+                    max_value=600,
+                    value=120,
+                    help="Maximum time to process each file (prevents hanging)"
+                )
+
+                max_retries = st.number_input(
+                    "Max retries for failed files",
+                    min_value=0,
+                    max_value=3,
+                    value=1,
+                    help="Number of retry attempts for failed files"
+                )
 
             reprocess = st.checkbox("Reprocess existing files", value=False)
 
@@ -351,15 +365,29 @@ def stage_json_extraction():
                 def progress_callback(info):
                     phase = info.get('phase')
 
-                    if phase == 'discovery_complete':
-                        logs.append(f"✅ Discovered {info['total_files']} files")
-                        log_placeholder.text('\n'.join(logs[-20:]))
+                    if phase == 'discovery':
+                        message = info.get('message', 'Discovering files...')
+                        logs.append(f"📂 {message}")
+                        log_placeholder.text('\n'.join(logs[-50:]))
+
+                    elif phase == 'discovery_complete':
+                        logs.append(f"✅ Discovered {info.get('total_files', 0)} files")
+                        log_placeholder.text('\n'.join(logs[-50:]))
+
+                    elif phase == 'processing_start':
+                        message = info.get('message')
+                        total_to_process = info.get('total_to_process')
+                        if message:
+                            logs.append(f"🔄 {message}")
+                        elif total_to_process is not None:
+                            logs.append(f"🔄 Processing {total_to_process} files")
+                        log_placeholder.text('\n'.join(logs[-50:]))
 
                     elif phase == 'processing':
-                        current = info['current']
-                        total = info['total']
-                        client_name = info['client_name']
-                        status = info['status']
+                        current = info.get('current', 0)
+                        total = info.get('total', 0)
+                        client_name = info.get('client_name') or 'Unknown client'
+                        status = info.get('status', 'unknown')
 
                         progress = current / total if total > 0 else 0
                         progress_bar.progress(progress)
@@ -369,24 +397,44 @@ def stage_json_extraction():
                         metric_processed.metric("✅ Processed", stats.get('processed', 0))
                         metric_failed.metric("❌ Failed", stats.get('failed', 0))
 
-                        if stats.get('start_time') and current > 0:
-                            elapsed = (datetime.now() - stats['start_time']).total_seconds()
-                            speed = current / elapsed if elapsed > 0 else 0
-                            metric_speed.metric("⚡ Speed", f"{speed:.1f} files/sec")
+                        start_time = stats.get('start_time')
+                        speed_display = "-"
+                        if isinstance(start_time, datetime) and current > 0:
+                            elapsed = (datetime.now() - start_time).total_seconds()
+                            if elapsed > 0:
+                                speed_display = f"{current / elapsed:.1f} files/sec"
+                        metric_speed.metric("⚡ Speed", speed_display)
 
-                        # Show detailed failure stats
-                        metric_timeout.metric("⏱️ Timeout", stats.get('timeout', 0))
-                        metric_corrupted.metric("🔥 Corrupted", stats.get('corrupted', 0))
+                        timeout_val = stats.get('timeout')
+                        metric_timeout.metric("⏱️ Timeout", timeout_val if timeout_val is not None else "-")
 
-                        # Show current file being processed
-                        current_file = stats.get('current_file', '')
-                        if current_file:
-                            file_name = Path(current_file).name
-                            metric_current.metric("📄 Current", file_name[:20])
+                        corrupted_val = stats.get('corrupted')
+                        metric_corrupted.metric("🔥 Corrupted", corrupted_val if corrupted_val is not None else "-")
+
+                        current_file_path = stats.get('current_file')
+                        if current_file_path:
+                            current_display = Path(current_file_path).name
+                        else:
+                            current_display = client_name
+                        if current_display and len(current_display) > 40:
+                            current_display = current_display[:37] + "..."
+                        metric_current.metric("📄 Current", current_display or "-")
 
                         icon = '✅' if status == 'success' else '❌'
                         logs.append(f"{icon} [{current}/{total}] {client_name}")
-                        log_placeholder.text('\n'.join(logs[-20:]))
+
+                        if status == 'error':
+                            error_message = info.get('error') or 'Unknown error'
+                            logs.append(f"   ↳ {error_message}")
+
+                        log_placeholder.text('\n'.join(logs[-50:]))
+
+                    elif phase == 'retry':
+                        retry_client = info.get('client_name') or 'Unknown client'
+                        retry_count = info.get('retry_count', 0)
+                        error_message = info.get('error') or 'Retry triggered'
+                        logs.append(f"🔁 Retry #{retry_count} for {retry_client}: {error_message}")
+                        log_placeholder.text('\n'.join(logs[-50:]))
 
                     elif phase == 'completed':
                         progress_bar.progress(1.0)
@@ -406,12 +454,22 @@ def stage_json_extraction():
                             """)
 
                         with col2:
-                            if stats.get('timeout', 0) > 0 or stats.get('corrupted', 0) > 0:
+                            timeout_val = stats.get('timeout', 0)
+                            corrupted_val = stats.get('corrupted', 0)
+                            failed_val = stats.get('failed', 0)
+                            retried_val = stats.get('retried', 0)
+                            if any([
+                                (timeout_val or 0) > 0,
+                                (corrupted_val or 0) > 0,
+                                (failed_val or 0) > 0,
+                                (retried_val or 0) > 0
+                            ]):
                                 st.warning(f"""
                                 ⚠️ **Issues Detected**
-                                - Timeout: {stats.get('timeout', 0)}
-                                - Corrupted: {stats.get('corrupted', 0)}
-                                - Retried: {stats.get('retried', 0)}
+                                - Timeout: {timeout_val or 0}
+                                - Corrupted: {corrupted_val or 0}
+                                - Retried: {retried_val or 0}
+                                - Failed: {failed_val or 0}
                                 """)
 
                         # Show stuck files if any
@@ -420,26 +478,46 @@ def stage_json_extraction():
                                 for stuck_file in stats['stuck_files']:
                                     st.text(f"- {stuck_file}")
 
+                        logs.append("✨ Processing completed")
+                        log_placeholder.text('\n'.join(logs[-50:]))
+
                         st.session_state.processing_complete = True
 
+                processor = None
+
                 try:
-                    processor = RobustClientProcessor(
-                        output_folder=output_folder,
-                        json_path=json_folder,
-                        db_path=db_path if enable_sqlite else None,
-                        enable_json=True,
-                        enable_sqlite=enable_sqlite,
-                        max_workers=max_workers,
-                        timeout_seconds=timeout_seconds,
-                        max_retries=max_retries,
-                        progress_callback=progress_callback
-                    )
+                    if processing_mode.startswith("Standard"):
+                        db_path_value = db_path or "client_data.db"
+                        processor = ClientProcessor(
+                            output_folder=output_folder,
+                            db_path=db_path_value,
+                            json_path=json_folder,
+                            enable_json=True,
+                            enable_sqlite=enable_sqlite,
+                            max_workers=max_workers,
+                            progress_callback=progress_callback
+                        )
+                    else:
+                        processor = RobustClientProcessor(
+                            output_folder=output_folder,
+                            json_path=json_folder,
+                            db_path=db_path if enable_sqlite else None,
+                            enable_json=True,
+                            enable_sqlite=enable_sqlite,
+                            max_workers=max_workers,
+                            timeout_seconds=timeout_seconds or 120,
+                            max_retries=max_retries or 0,
+                            progress_callback=progress_callback
+                        )
 
                     processor.process_all(reprocess=reprocess)
-                    processor.close()
 
                 except Exception as e:
                     st.error(f"❌ Error during extraction: {e}")
+
+                finally:
+                    if processor:
+                        processor.close()
 
     # TAB 2: Pattern Clustering
     with tab2:

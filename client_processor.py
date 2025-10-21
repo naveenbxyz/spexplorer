@@ -206,33 +206,44 @@ class ClientProcessor:
         try:
             # Create thread-local extractor
             extractor = ClientExtractor()
-            file_path = file_info['file_path']
+            file_path = Path(file_info['file_path'])
+            label = file_info.get('client_name') or file_info.get('filename') or file_path.name
 
             # Extract client data
-            client_data = extractor.extract_client_data(file_path, file_info)
+            client_data = extractor.extract_client_data(str(file_path), file_info)
+
+            processing_metadata = client_data.get('processing_metadata', {})
+            errors: List[str] = []
+            extraction_success = processing_metadata.get('status') == 'success'
+
+            if not extraction_success:
+                extraction_error = processing_metadata.get('error') or 'Extraction failed without a specific error message'
+                errors.append(f"Extraction failed for {label}: {extraction_error}")
 
             # Save to JSON storage (thread-safe)
-            if self.json_storage:
+            if extraction_success and self.json_storage:
                 try:
                     self.json_storage.save_client(client_data)
                     result['json_written'] = True
                 except Exception as e:
-                    result['error'] = f"JSON save failed: {e}"
+                    errors.append(f"JSON save failed for {label}: {e}")
 
             # Save to SQLite database (with lock)
-            if self.db:
+            if extraction_success and self.db:
                 try:
                     with self.stats_lock:
                         self.db.save_client(client_data)
                     result['sqlite_written'] = True
                 except Exception as e:
-                    if not result['error']:
-                        result['error'] = f"SQLite save failed: {e}"
+                    errors.append(f"SQLite save failed for {label}: {e}")
 
-            result['success'] = True
+            if errors:
+                result['error'] = " | ".join(errors)
+            else:
+                result['success'] = True
 
         except Exception as e:
-            result['error'] = str(e)
+            result['error'] = f"Processing crashed for {file_info.get('filename') or file_info.get('file_path')}: {e}"
 
         return result
 
