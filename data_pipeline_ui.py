@@ -15,7 +15,7 @@ import pandas as pd
 # Import existing modules
 from sharepoint_client import SharePointClient
 from concurrent_downloader import ConcurrentDownloader
-from client_processor import ClientProcessor
+from client_processor_robust import RobustClientProcessor
 from json_storage import JSONStorage
 from client_database import ClientDatabase
 from pattern_clustering import PatternClusterer
@@ -308,6 +308,22 @@ def stage_json_extraction():
                 help="More workers = faster (but uses more CPU)"
             )
 
+            timeout_seconds = st.number_input(
+                "Timeout per file (seconds)",
+                min_value=30,
+                max_value=600,
+                value=120,
+                help="Maximum time to process each file (prevents hanging)"
+            )
+
+            max_retries = st.number_input(
+                "Max retries for failed files",
+                min_value=0,
+                max_value=3,
+                value=1,
+                help="Number of retry attempts for failed files"
+            )
+
             reprocess = st.checkbox("Reprocess existing files", value=False)
 
         if st.button("🚀 Start Extraction", type="primary"):
@@ -321,6 +337,12 @@ def stage_json_extraction():
                 metric_processed = stats_col1.empty()
                 metric_failed = stats_col2.empty()
                 metric_speed = stats_col3.empty()
+
+                # Add more detailed stats
+                stats_col4, stats_col5, stats_col6 = st.columns(3)
+                metric_timeout = stats_col4.empty()
+                metric_corrupted = stats_col5.empty()
+                metric_current = stats_col6.empty()
 
                 log_container = st.expander("📋 Processing Log", expanded=True)
                 log_placeholder = log_container.empty()
@@ -344,13 +366,23 @@ def stage_json_extraction():
                         status_text.text(f"Processing {current}/{total}: {client_name}")
 
                         stats = info.get('stats', {})
-                        metric_processed.metric("Processed", stats.get('processed', 0))
-                        metric_failed.metric("Failed", stats.get('failed', 0))
+                        metric_processed.metric("✅ Processed", stats.get('processed', 0))
+                        metric_failed.metric("❌ Failed", stats.get('failed', 0))
 
                         if stats.get('start_time') and current > 0:
                             elapsed = (datetime.now() - stats['start_time']).total_seconds()
                             speed = current / elapsed if elapsed > 0 else 0
-                            metric_speed.metric("Files/sec", f"{speed:.1f}")
+                            metric_speed.metric("⚡ Speed", f"{speed:.1f} files/sec")
+
+                        # Show detailed failure stats
+                        metric_timeout.metric("⏱️ Timeout", stats.get('timeout', 0))
+                        metric_corrupted.metric("🔥 Corrupted", stats.get('corrupted', 0))
+
+                        # Show current file being processed
+                        current_file = stats.get('current_file', '')
+                        if current_file:
+                            file_name = Path(current_file).name
+                            metric_current.metric("📄 Current", file_name[:20])
 
                         icon = '✅' if status == 'success' else '❌'
                         logs.append(f"{icon} [{current}/{total}] {client_name}")
@@ -361,24 +393,45 @@ def stage_json_extraction():
                         stats = info['stats']
                         status_text.text("✅ Extraction complete!")
 
-                        st.success(f"""
-                        ✅ **Extraction Complete!**
-                        - Processed: {stats['processed']}
-                        - Failed: {stats['failed']}
-                        - JSON files: {stats.get('json_written', 0)}
-                        - SQLite records: {stats.get('sqlite_written', 0)}
-                        """)
+                        # Show completion summary
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.success(f"""
+                            ✅ **Extraction Complete!**
+                            - Processed: {stats['processed']}
+                            - Failed: {stats['failed']}
+                            - JSON files: {stats.get('json_written', 0)}
+                            - SQLite records: {stats.get('sqlite_written', 0)}
+                            """)
+
+                        with col2:
+                            if stats.get('timeout', 0) > 0 or stats.get('corrupted', 0) > 0:
+                                st.warning(f"""
+                                ⚠️ **Issues Detected**
+                                - Timeout: {stats.get('timeout', 0)}
+                                - Corrupted: {stats.get('corrupted', 0)}
+                                - Retried: {stats.get('retried', 0)}
+                                """)
+
+                        # Show stuck files if any
+                        if stats.get('stuck_files'):
+                            with st.expander(f"⚠️ {len(stats['stuck_files'])} Files Timed Out"):
+                                for stuck_file in stats['stuck_files']:
+                                    st.text(f"- {stuck_file}")
 
                         st.session_state.processing_complete = True
 
                 try:
-                    processor = ClientProcessor(
+                    processor = RobustClientProcessor(
                         output_folder=output_folder,
                         json_path=json_folder,
                         db_path=db_path if enable_sqlite else None,
                         enable_json=True,
                         enable_sqlite=enable_sqlite,
                         max_workers=max_workers,
+                        timeout_seconds=timeout_seconds,
+                        max_retries=max_retries,
                         progress_callback=progress_callback
                     )
 
