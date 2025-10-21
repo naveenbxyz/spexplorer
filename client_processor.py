@@ -1,11 +1,14 @@
 """
 Batch processor for client-centric Excel parsing.
 Writes to both SQLite database and JSON files.
+Supports concurrent processing for faster throughput.
 """
 
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from file_selector import FileSelector
 from client_extractor import ClientExtractor
 from client_database import ClientDatabase
@@ -24,6 +27,7 @@ class ClientProcessor:
         json_path: str = "./extracted_json",
         enable_json: bool = True,
         enable_sqlite: bool = True,
+        max_workers: int = 4,
         progress_callback: Optional[Callable] = None
     ):
         """
@@ -35,6 +39,7 @@ class ClientProcessor:
             json_path: Path to JSON storage directory
             enable_json: Enable JSON file output
             enable_sqlite: Enable SQLite database output
+            max_workers: Maximum concurrent workers (default: 4)
             progress_callback: Optional callback for progress updates
         """
         self.output_folder = output_folder
@@ -42,15 +47,17 @@ class ClientProcessor:
         self.json_path = json_path
         self.enable_json = enable_json
         self.enable_sqlite = enable_sqlite
+        self.max_workers = max_workers
         self.progress_callback = progress_callback
 
         self.file_selector = FileSelector()
-        self.extractor = ClientExtractor()
 
         # Initialize storage backends
         self.db = ClientDatabase(db_path) if enable_sqlite else None
         self.json_storage = JSONStorage(json_path) if enable_json else None
 
+        # Thread safety
+        self.stats_lock = threading.Lock()
         self.stats = {
             'total_files': 0,
             'selected_files': 0,
@@ -117,35 +124,58 @@ class ClientProcessor:
                 'message': f'Processing {len(clients_to_process)} clients'
             })
 
-        # Process each client
-        for idx, file_info in enumerate(clients_to_process):
-            try:
-                self._process_client(file_info)
-                self.stats['processed'] += 1
+        # Process clients concurrently
+        completed = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(self._process_client_safe, file_info): file_info
+                for file_info in clients_to_process
+            }
 
-                if self.progress_callback:
-                    self.progress_callback({
-                        'phase': 'processing',
-                        'current': idx + 1,
-                        'total': len(clients_to_process),
-                        'client_name': file_info.get('client_name'),
-                        'status': 'success',
-                        'stats': self.stats.copy()
-                    })
+            # Process results as they complete
+            for future in as_completed(future_to_file):
+                file_info = future_to_file[future]
+                completed += 1
 
-            except Exception as e:
-                self.stats['failed'] += 1
+                try:
+                    result = future.result()
 
-                if self.progress_callback:
-                    self.progress_callback({
-                        'phase': 'processing',
-                        'current': idx + 1,
-                        'total': len(clients_to_process),
-                        'client_name': file_info.get('client_name'),
-                        'status': 'error',
-                        'error': str(e),
-                        'stats': self.stats.copy()
-                    })
+                    with self.stats_lock:
+                        if result['success']:
+                            self.stats['processed'] += 1
+                            if result.get('json_written'):
+                                self.stats['json_written'] += 1
+                            if result.get('sqlite_written'):
+                                self.stats['sqlite_written'] += 1
+                        else:
+                            self.stats['failed'] += 1
+
+                    if self.progress_callback:
+                        self.progress_callback({
+                            'phase': 'processing',
+                            'current': completed,
+                            'total': len(clients_to_process),
+                            'client_name': file_info.get('client_name'),
+                            'status': 'success' if result['success'] else 'error',
+                            'error': result.get('error'),
+                            'stats': self.stats.copy()
+                        })
+
+                except Exception as e:
+                    with self.stats_lock:
+                        self.stats['failed'] += 1
+
+                    if self.progress_callback:
+                        self.progress_callback({
+                            'phase': 'processing',
+                            'current': completed,
+                            'total': len(clients_to_process),
+                            'client_name': file_info.get('client_name'),
+                            'status': 'error',
+                            'error': str(e),
+                            'stats': self.stats.copy()
+                        })
 
         self.stats['end_time'] = datetime.now()
 
@@ -156,33 +186,55 @@ class ClientProcessor:
                 'message': 'Processing completed'
             })
 
-    def _process_client(self, file_info: Dict[str, Any]):
+    def _process_client_safe(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process a single client Excel file.
+        Process a single client Excel file (thread-safe wrapper).
 
         Args:
             file_info: File information with client metadata
+
+        Returns:
+            Result dictionary with success status
         """
-        file_path = file_info['file_path']
+        result = {
+            'success': False,
+            'json_written': False,
+            'sqlite_written': False,
+            'error': None
+        }
 
-        # Extract client data
-        client_data = self.extractor.extract_client_data(file_path, file_info)
+        try:
+            # Create thread-local extractor
+            extractor = ClientExtractor()
+            file_path = file_info['file_path']
 
-        # Save to JSON storage
-        if self.json_storage:
-            try:
-                self.json_storage.save_client(client_data)
-                self.stats['json_written'] += 1
-            except Exception as e:
-                print(f"⚠️  Failed to save JSON for {file_info.get('client_name')}: {e}")
+            # Extract client data
+            client_data = extractor.extract_client_data(file_path, file_info)
 
-        # Save to SQLite database
-        if self.db:
-            try:
-                self.db.save_client(client_data)
-                self.stats['sqlite_written'] += 1
-            except Exception as e:
-                print(f"⚠️  Failed to save to SQLite for {file_info.get('client_name')}: {e}")
+            # Save to JSON storage (thread-safe)
+            if self.json_storage:
+                try:
+                    self.json_storage.save_client(client_data)
+                    result['json_written'] = True
+                except Exception as e:
+                    result['error'] = f"JSON save failed: {e}"
+
+            # Save to SQLite database (with lock)
+            if self.db:
+                try:
+                    with self.stats_lock:
+                        self.db.save_client(client_data)
+                    result['sqlite_written'] = True
+                except Exception as e:
+                    if not result['error']:
+                        result['error'] = f"SQLite save failed: {e}"
+
+            result['success'] = True
+
+        except Exception as e:
+            result['error'] = str(e)
+
+        return result
 
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -261,6 +313,12 @@ def main():
         action='store_true',
         help='Reprocess files that have already been processed'
     )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=4,
+        help='Number of concurrent workers (default: 4)'
+    )
 
     args = parser.parse_args()
 
@@ -309,6 +367,7 @@ def main():
         json_path=args.json,
         enable_json=not args.no_json,
         enable_sqlite=not args.no_sqlite,
+        max_workers=args.workers,
         progress_callback=progress_callback
     ) as processor:
         processor.process_all(reprocess=args.reprocess)
