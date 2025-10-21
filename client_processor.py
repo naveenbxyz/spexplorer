@@ -1,5 +1,6 @@
 """
 Batch processor for client-centric Excel parsing.
+Writes to both SQLite database and JSON files.
 """
 
 from pathlib import Path
@@ -8,6 +9,7 @@ from datetime import datetime
 from file_selector import FileSelector
 from client_extractor import ClientExtractor
 from client_database import ClientDatabase
+from json_storage import JSONStorage
 
 
 class ClientProcessor:
@@ -19,6 +21,9 @@ class ClientProcessor:
         self,
         output_folder: str,
         db_path: str = "client_data.db",
+        json_path: str = "./extracted_json",
+        enable_json: bool = True,
+        enable_sqlite: bool = True,
         progress_callback: Optional[Callable] = None
     ):
         """
@@ -27,15 +32,24 @@ class ClientProcessor:
         Args:
             output_folder: Root folder containing downloaded Excel files
             db_path: Path to SQLite database
+            json_path: Path to JSON storage directory
+            enable_json: Enable JSON file output
+            enable_sqlite: Enable SQLite database output
             progress_callback: Optional callback for progress updates
         """
         self.output_folder = output_folder
         self.db_path = db_path
+        self.json_path = json_path
+        self.enable_json = enable_json
+        self.enable_sqlite = enable_sqlite
         self.progress_callback = progress_callback
 
         self.file_selector = FileSelector()
         self.extractor = ClientExtractor()
-        self.db = ClientDatabase(db_path)
+
+        # Initialize storage backends
+        self.db = ClientDatabase(db_path) if enable_sqlite else None
+        self.json_storage = JSONStorage(json_path) if enable_json else None
 
         self.stats = {
             'total_files': 0,
@@ -44,7 +58,9 @@ class ClientProcessor:
             'processed': 0,
             'failed': 0,
             'start_time': None,
-            'end_time': None
+            'end_time': None,
+            'json_written': 0,
+            'sqlite_written': 0
         }
 
     def process_all(self, reprocess: bool = False):
@@ -82,8 +98,13 @@ class ClientProcessor:
             file_info['client_id'] = client_id
 
             if not reprocess:
-                # Check if already processed
-                existing = self.db.get_client(client_id)
+                # Check if already processed (prefer JSON storage if enabled)
+                existing = None
+                if self.json_storage:
+                    existing = self.json_storage.get_client(client_id)
+                elif self.db:
+                    existing = self.db.get_client(client_id)
+
                 if existing and existing.get('processing_metadata', {}).get('status') == 'success':
                     continue
 
@@ -147,8 +168,21 @@ class ClientProcessor:
         # Extract client data
         client_data = self.extractor.extract_client_data(file_path, file_info)
 
-        # Save to database
-        self.db.save_client(client_data)
+        # Save to JSON storage
+        if self.json_storage:
+            try:
+                self.json_storage.save_client(client_data)
+                self.stats['json_written'] += 1
+            except Exception as e:
+                print(f"⚠️  Failed to save JSON for {file_info.get('client_name')}: {e}")
+
+        # Save to SQLite database
+        if self.db:
+            try:
+                self.db.save_client(client_data)
+                self.stats['sqlite_written'] += 1
+            except Exception as e:
+                print(f"⚠️  Failed to save to SQLite for {file_info.get('client_name')}: {e}")
 
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -159,9 +193,12 @@ class ClientProcessor:
         """
         stats = self.stats.copy()
 
-        # Add database statistics
-        db_stats = self.db.get_statistics()
-        stats['database'] = db_stats
+        # Add storage statistics
+        if self.db:
+            stats['sqlite'] = self.db.get_statistics()
+
+        if self.json_storage:
+            stats['json'] = self.json_storage.get_statistics()
 
         # Calculate processing time
         if stats['start_time'] and stats['end_time']:
@@ -175,8 +212,9 @@ class ClientProcessor:
         return stats
 
     def close(self):
-        """Close database connection."""
-        self.db.close()
+        """Close storage connections."""
+        if self.db:
+            self.db.close()
 
     def __enter__(self):
         return self
@@ -202,6 +240,21 @@ def main():
         '--db',
         default='client_data.db',
         help='SQLite database path (default: client_data.db)'
+    )
+    parser.add_argument(
+        '--json',
+        default='./extracted_json',
+        help='JSON storage directory (default: ./extracted_json)'
+    )
+    parser.add_argument(
+        '--no-json',
+        action='store_true',
+        help='Disable JSON file output'
+    )
+    parser.add_argument(
+        '--no-sqlite',
+        action='store_true',
+        help='Disable SQLite database output'
     )
     parser.add_argument(
         '--reprocess',
@@ -242,6 +295,8 @@ def main():
             print(f"   Selected: {stats['selected_files']}")
             print(f"   Processed: {stats['processed']}")
             print(f"   Failed: {stats['failed']}")
+            print(f"   JSON files written: {stats.get('json_written', 0)}")
+            print(f"   SQLite records written: {stats.get('sqlite_written', 0)}")
 
             if stats['end_time'] and stats['start_time']:
                 duration = stats['end_time'] - stats['start_time']
@@ -251,24 +306,44 @@ def main():
     with ClientProcessor(
         output_folder=args.output_folder,
         db_path=args.db,
+        json_path=args.json,
+        enable_json=not args.no_json,
+        enable_sqlite=not args.no_sqlite,
         progress_callback=progress_callback
     ) as processor:
         processor.process_all(reprocess=args.reprocess)
 
         # Print final statistics
         final_stats = processor.get_statistics()
-        print("\n" + "="*60)
-        print("DATABASE STATISTICS")
-        print("="*60)
 
-        db_stats = final_stats.get('database', {})
-        print(f"Total clients: {db_stats.get('total_clients', 0)}")
-        print(f"Processed: {db_stats.get('processed_clients', 0)}")
-        print(f"Pending: {db_stats.get('pending_clients', 0)}")
-        print(f"Failed: {db_stats.get('failed_clients', 0)}")
-        print(f"Countries: {db_stats.get('countries', 0)}")
-        print(f"Products: {db_stats.get('products', 0)}")
-        print(f"Unique patterns: {db_stats.get('unique_patterns', 0)}")
+        # Print JSON statistics if enabled
+        if not args.no_json:
+            print("\n" + "="*60)
+            print("JSON STORAGE STATISTICS")
+            print("="*60)
+
+            json_stats = final_stats.get('json', {})
+            print(f"Total clients: {json_stats.get('total_clients', 0)}")
+            print(f"Countries: {json_stats.get('countries', 0)}")
+            print(f"Products: {json_stats.get('products', 0)}")
+            print(f"Unique patterns: {json_stats.get('unique_patterns', 0)}")
+            print(f"Success: {json_stats.get('success_count', 0)}")
+            print(f"Failed: {json_stats.get('failed_count', 0)}")
+
+        # Print SQLite statistics if enabled
+        if not args.no_sqlite:
+            print("\n" + "="*60)
+            print("SQLITE DATABASE STATISTICS")
+            print("="*60)
+
+            db_stats = final_stats.get('sqlite', {})
+            print(f"Total clients: {db_stats.get('total_clients', 0)}")
+            print(f"Processed: {db_stats.get('processed_clients', 0)}")
+            print(f"Pending: {db_stats.get('pending_clients', 0)}")
+            print(f"Failed: {db_stats.get('failed_clients', 0)}")
+            print(f"Countries: {db_stats.get('countries', 0)}")
+            print(f"Products: {db_stats.get('products', 0)}")
+            print(f"Unique patterns: {db_stats.get('unique_patterns', 0)}")
 
 
 if __name__ == '__main__':

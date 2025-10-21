@@ -1,10 +1,12 @@
 """
 Client-centric Excel extractor with intelligent section detection.
 Handles key-value pairs, tables, and complex headers with merged cells.
+Enhanced with confidence scores and cell formatting metadata.
 """
 
 import openpyxl
 from openpyxl.cell import MergedCell
+from openpyxl.styles import Font, PatternFill
 from typing import Dict, List, Any, Optional, Tuple, Set
 from datetime import datetime, date
 import json
@@ -19,6 +21,7 @@ class ClientExtractor:
     def __init__(self):
         self.min_key_value_rows = 2
         self.min_table_rows = 2
+        self.cell_formatting_cache = {}  # Cache for cell formatting info
 
     def extract_client_data(
         self,
@@ -99,6 +102,9 @@ class ClientExtractor:
         if sheet.max_row == 0:
             return sheet_data
 
+        # Cache cell formatting for the sheet
+        self._cache_cell_formatting(sheet)
+
         # Get merged cell ranges
         merged_ranges = self._get_merged_cell_ranges(sheet)
 
@@ -115,12 +121,61 @@ class ClientExtractor:
                 section_region,
                 idx,
                 merged_ranges,
-                warnings
+                warnings,
+                sheet
             )
             if section:
                 sheet_data['sections'].append(section)
 
         return sheet_data
+
+    def _cache_cell_formatting(self, sheet):
+        """
+        Cache cell formatting information for analysis.
+
+        Args:
+            sheet: openpyxl worksheet
+        """
+        self.cell_formatting_cache = {}
+
+        for row in sheet.iter_rows():
+            for cell in row:
+                if not isinstance(cell, MergedCell):
+                    formatting = {}
+
+                    # Font properties
+                    if cell.font:
+                        formatting['bold'] = cell.font.bold or False
+                        formatting['italic'] = cell.font.italic or False
+                        formatting['font_size'] = cell.font.size
+                        formatting['font_color'] = str(cell.font.color.rgb) if cell.font.color and hasattr(cell.font.color, 'rgb') else None
+
+                    # Fill/background color
+                    if cell.fill:
+                        formatting['fill_type'] = cell.fill.patternType
+                        if hasattr(cell.fill, 'fgColor') and cell.fill.fgColor:
+                            formatting['fill_color'] = str(cell.fill.fgColor.rgb) if hasattr(cell.fill.fgColor, 'rgb') else None
+
+                    # Border properties
+                    if cell.border:
+                        formatting['has_border'] = any([
+                            cell.border.left and cell.border.left.style,
+                            cell.border.right and cell.border.right.style,
+                            cell.border.top and cell.border.top.style,
+                            cell.border.bottom and cell.border.bottom.style
+                        ])
+
+                    # Alignment
+                    if cell.alignment:
+                        formatting['horizontal_align'] = cell.alignment.horizontal
+                        formatting['vertical_align'] = cell.alignment.vertical
+
+                    if formatting:
+                        self.cell_formatting_cache[(cell.row, cell.column)] = formatting
+
+    def _get_cell_formatting(self, row: int, col: int) -> Dict[str, Any]:
+        """Get cached formatting for a cell."""
+        return self.cell_formatting_cache.get((row, col), {})
 
     def _get_merged_cell_ranges(self, sheet) -> List[Dict[str, Any]]:
         """
@@ -246,7 +301,8 @@ class ClientExtractor:
         region: Dict[str, int],
         section_idx: int,
         merged_ranges: List[Dict[str, Any]],
-        warnings: List[str]
+        warnings: List[str],
+        sheet
     ) -> Optional[Dict[str, Any]]:
         """
         Extract a single section and determine its type.
@@ -257,9 +313,10 @@ class ClientExtractor:
             section_idx: Section index
             merged_ranges: Merged cell ranges
             warnings: List to append warnings
+            sheet: openpyxl worksheet
 
         Returns:
-            Section data dictionary
+            Section data dictionary with confidence score
         """
         start_row = region['start_row']
         end_row = region['end_row']
@@ -275,51 +332,86 @@ class ClientExtractor:
                 row_data.append(value)
             raw_data.append(row_data)
 
-        # Detect section type
-        section_type, section_header = self._detect_section_type(raw_data, merged_ranges, region)
+        # Detect section type with confidence
+        section_type, section_header, confidence = self._detect_section_type_with_confidence(
+            raw_data, merged_ranges, region
+        )
 
         # Extract based on type
+        section_data = None
         if section_type == 'key_value':
-            return self._extract_key_value_section(raw_data, region, section_idx, section_header)
+            section_data = self._extract_key_value_section(raw_data, region, section_idx, section_header)
         elif section_type == 'table':
-            return self._extract_table_section(raw_data, region, section_idx, section_header, warnings)
+            section_data = self._extract_table_section(raw_data, region, section_idx, section_header, warnings)
         elif section_type == 'complex_header':
-            return self._extract_complex_header_section(
+            section_data = self._extract_complex_header_section(
                 raw_data, region, section_idx, section_header, merged_ranges, warnings
             )
         else:
             # Unknown type - store as raw
-            return self._extract_raw_section(raw_data, region, section_idx)
+            section_data = self._extract_raw_section(raw_data, region, section_idx)
 
-    def _detect_section_type(
+        # Add confidence score and metadata
+        if section_data:
+            section_data['detection_confidence'] = confidence
+            section_data['cell_coordinates'] = {
+                'start_row': start_row,
+                'end_row': end_row,
+                'start_col': start_col,
+                'end_col': end_col
+            }
+
+            # Add formatting hints for header row
+            if section_type in ['table', 'complex_header']:
+                header_formatting = self._get_cell_formatting(start_row, start_col)
+                if header_formatting:
+                    section_data['header_formatting'] = header_formatting
+
+        return section_data
+
+    def _detect_section_type_with_confidence(
         self,
         raw_data: List[List[Any]],
         merged_ranges: List[Dict[str, Any]],
         region: Dict[str, int]
-    ) -> Tuple[str, Optional[str]]:
+    ) -> Tuple[str, Optional[str], float]:
         """
-        Detect section type: key_value, table, or complex_header.
+        Detect section type with confidence score.
 
         Returns:
-            (section_type, section_header)
+            (section_type, section_header, confidence_score)
         """
         if not raw_data or len(raw_data) < 2:
-            return ('raw', None)
+            return ('raw', None, 1.0)
+
+        confidence_scores = {
+            'key_value': 0.0,
+            'table': 0.0,
+            'complex_header': 0.0,
+            'raw': 0.5  # default baseline
+        }
 
         # Check for section header (first row is single cell or title)
         section_header = None
         first_row = raw_data[0]
         first_row_non_empty = [v for v in first_row if self._is_non_empty(v)]
 
+        # Check if first row is bold (indicates header)
+        first_row_formatting = self._get_cell_formatting(region['start_row'], region['start_col'])
+        is_first_row_bold = first_row_formatting.get('bold', False)
+
         if len(first_row_non_empty) == 1 and isinstance(first_row_non_empty[0], str):
             # Likely a section header
             section_header = str(first_row_non_empty[0]).strip()
             data_rows = raw_data[1:]
+            if is_first_row_bold:
+                confidence_scores['table'] += 0.2
+                confidence_scores['complex_header'] += 0.2
         else:
             data_rows = raw_data
 
         if len(data_rows) < 2:
-            return ('raw', section_header)
+            return ('raw', section_header, 1.0)
 
         # Check for merged cells in header area (indicates complex header)
         has_merged_in_header = any(
@@ -330,23 +422,60 @@ class ClientExtractor:
         )
 
         if has_merged_in_header:
-            return ('complex_header', section_header)
+            confidence_scores['complex_header'] += 0.8
 
         # Check for key-value pattern (2 columns, mostly strings in col 1)
         non_empty_cols = self._count_non_empty_columns(data_rows)
 
         if non_empty_cols <= 2:
+            confidence_scores['key_value'] += 0.3
+
             # Check if first column has string labels
             first_col_strings = sum(
                 1 for row in data_rows
                 if row and isinstance(row[0], str) and self._is_non_empty(row[0])
             )
 
-            if first_col_strings >= len(data_rows) * 0.7:
-                return ('key_value', section_header)
+            first_col_ratio = first_col_strings / len(data_rows) if len(data_rows) > 0 else 0
+            confidence_scores['key_value'] += first_col_ratio * 0.7
 
-        # Default to table
-        return ('table', section_header)
+        # Check for table indicators
+        if non_empty_cols > 2:
+            confidence_scores['table'] += 0.5
+
+        # Check if first data row has uniform types (header-like)
+        if data_rows:
+            first_data_row = data_rows[0]
+            string_count = sum(1 for v in first_data_row if isinstance(v, str) and self._is_non_empty(v))
+            if string_count >= len([v for v in first_data_row if self._is_non_empty(v)]) * 0.8:
+                confidence_scores['table'] += 0.3
+
+        # Determine winner
+        section_type = max(confidence_scores, key=confidence_scores.get)
+        confidence = confidence_scores[section_type]
+
+        # Normalize confidence to 0-1 range
+        confidence = min(1.0, max(0.0, confidence))
+
+        return (section_type, section_header, confidence)
+
+    def _detect_section_type(
+        self,
+        raw_data: List[List[Any]],
+        merged_ranges: List[Dict[str, Any]],
+        region: Dict[str, int]
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Detect section type: key_value, table, or complex_header.
+        Legacy method - calls confidence-based version.
+
+        Returns:
+            (section_type, section_header)
+        """
+        section_type, section_header, _ = self._detect_section_type_with_confidence(
+            raw_data, merged_ranges, region
+        )
+        return (section_type, section_header)
 
     def _extract_key_value_section(
         self,
