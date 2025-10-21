@@ -318,18 +318,18 @@ def stage_json_extraction():
                 help="More workers = faster (but uses more CPU)"
             )
 
-            timeout_seconds = None
+            # Timeout is now available for both modes
+            timeout_seconds = st.number_input(
+                "Timeout per file (seconds)",
+                min_value=30,
+                max_value=600,
+                value=300,
+                help="Maximum time to process each file (prevents hanging). Default: 300s (5 min)"
+            )
+
             max_retries = None
 
             if processing_mode.startswith("Robust"):
-                timeout_seconds = st.number_input(
-                    "Timeout per file (seconds)",
-                    min_value=30,
-                    max_value=600,
-                    value=120,
-                    help="Maximum time to process each file (prevents hanging)"
-                )
-
                 max_retries = st.number_input(
                     "Max retries for failed files",
                     min_value=0,
@@ -495,7 +495,8 @@ def stage_json_extraction():
                             enable_json=True,
                             enable_sqlite=enable_sqlite,
                             max_workers=max_workers,
-                            progress_callback=progress_callback
+                            progress_callback=progress_callback,
+                            timeout_seconds=timeout_seconds or 300
                         )
                     else:
                         processor = RobustClientProcessor(

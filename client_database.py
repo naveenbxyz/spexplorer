@@ -27,9 +27,18 @@ class ClientDatabase:
         self._connect()
         self._create_tables()
 
+        # Enable WAL mode for better concurrent write performance
+        try:
+            self.cursor.execute("PRAGMA journal_mode=WAL")
+            self.conn.commit()
+        except Exception as e:
+            print(f"Warning: Could not enable WAL mode: {e}")
+
     def _connect(self):
         """Establish database connection."""
-        self.conn = sqlite3.connect(self.db_path)
+        # check_same_thread=False allows the connection to be shared across threads
+        # We handle thread safety with locks in ClientProcessor
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30.0)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
 
@@ -136,44 +145,56 @@ class ClientDatabase:
         client_id = client_data['client_id']
         processing_meta = client_data.get('processing_metadata', {})
 
-        self.cursor.execute("""
-            INSERT INTO clients (
-                client_id, client_name, country, product,
-                file_path, filename, extracted_date, is_latest, form_variant,
-                full_json, pattern_signature, processing_status,
-                processed_at, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(client_id) DO UPDATE SET
-                client_name = excluded.client_name,
-                country = excluded.country,
-                product = excluded.product,
-                full_json = excluded.full_json,
-                pattern_signature = excluded.pattern_signature,
-                processing_status = excluded.processing_status,
-                processed_at = excluded.processed_at,
-                error_message = excluded.error_message
-        """, (
-            client_id,
-            client_data.get('client_name'),
-            client_data.get('country'),
-            client_data.get('product'),
-            client_data.get('file_info', {}).get('file_path'),
-            client_data.get('file_info', {}).get('filename'),
-            client_data.get('file_info', {}).get('extracted_date'),
-            client_data.get('file_info', {}).get('is_latest', False),
-            client_data.get('file_info', {}).get('form_variant'),
-            json.dumps(client_data),
-            client_data.get('pattern_signature'),
-            processing_meta.get('status', 'success'),
-            processing_meta.get('processed_at'),
-            processing_meta.get('error')
-        ))
+        try:
+            self.cursor.execute("""
+                INSERT INTO clients (
+                    client_id, client_name, country, product,
+                    file_path, filename, extracted_date, is_latest, form_variant,
+                    full_json, pattern_signature, processing_status,
+                    processed_at, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    client_name = excluded.client_name,
+                    country = excluded.country,
+                    product = excluded.product,
+                    full_json = excluded.full_json,
+                    pattern_signature = excluded.pattern_signature,
+                    processing_status = excluded.processing_status,
+                    processed_at = excluded.processed_at,
+                    error_message = excluded.error_message
+            """, (
+                client_id,
+                client_data.get('client_name'),
+                client_data.get('country'),
+                client_data.get('product'),
+                client_data.get('file_info', {}).get('file_path'),
+                client_data.get('file_info', {}).get('filename'),
+                client_data.get('file_info', {}).get('extracted_date'),
+                client_data.get('file_info', {}).get('is_latest', False),
+                client_data.get('file_info', {}).get('form_variant'),
+                json.dumps(client_data),
+                client_data.get('pattern_signature'),
+                processing_meta.get('status', 'success'),
+                processing_meta.get('processed_at'),
+                processing_meta.get('error')
+            ))
 
-        # Save section metadata
-        self._save_section_metadata(client_id, client_data)
+            # Save section metadata
+            self._save_section_metadata(client_id, client_data)
 
-        self.conn.commit()
-        return client_id
+            # Force commit immediately
+            self.conn.commit()
+
+            # Verify the data was written
+            self.cursor.execute("SELECT client_id FROM clients WHERE client_id = ?", (client_id,))
+            if not self.cursor.fetchone():
+                raise Exception(f"Failed to verify write of client_id {client_id}")
+
+            return client_id
+
+        except Exception as e:
+            self.conn.rollback()
+            raise Exception(f"Database save failed for {client_id}: {str(e)}")
 
     def _save_section_metadata(self, client_id: str, client_data: Dict[str, Any]):
         """Save section metadata for querying."""

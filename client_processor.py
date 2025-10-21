@@ -28,7 +28,8 @@ class ClientProcessor:
         enable_json: bool = True,
         enable_sqlite: bool = True,
         max_workers: int = 4,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        timeout_seconds: int = 300
     ):
         """
         Initialize client processor.
@@ -41,6 +42,7 @@ class ClientProcessor:
             enable_sqlite: Enable SQLite database output
             max_workers: Maximum concurrent workers (default: 4)
             progress_callback: Optional callback for progress updates
+            timeout_seconds: Timeout per file in seconds (default: 300 = 5 minutes)
         """
         self.output_folder = output_folder
         self.db_path = db_path
@@ -49,6 +51,7 @@ class ClientProcessor:
         self.enable_sqlite = enable_sqlite
         self.max_workers = max_workers
         self.progress_callback = progress_callback
+        self.timeout_seconds = timeout_seconds
 
         self.file_selector = FileSelector()
 
@@ -64,10 +67,14 @@ class ClientProcessor:
             'ignored_files': 0,
             'processed': 0,
             'failed': 0,
+            'timeout': 0,
+            'slow_files': 0,
             'start_time': None,
             'end_time': None,
             'json_written': 0,
-            'sqlite_written': 0
+            'sqlite_written': 0,
+            'slow_file_list': [],
+            'timeout_file_list': []
         }
 
     def process_all(self, reprocess: bool = False):
@@ -139,7 +146,19 @@ class ClientProcessor:
                 completed += 1
 
                 try:
-                    result = future.result()
+                    # Apply timeout to future result
+                    result = future.result(timeout=self.timeout_seconds)
+
+                    # Check if file was slow (over 60 seconds)
+                    duration = result.get('duration_seconds', 0)
+                    if duration > 60:
+                        with self.stats_lock:
+                            self.stats['slow_files'] += 1
+                            self.stats['slow_file_list'].append({
+                                'file': file_info.get('client_name'),
+                                'duration': duration
+                            })
+                        print(f"⚠️  SLOW FILE WARNING: {file_info.get('client_name')} took {duration:.1f}s")
 
                     with self.stats_lock:
                         if result['success']:
@@ -159,6 +178,27 @@ class ClientProcessor:
                             'client_name': file_info.get('client_name'),
                             'status': 'success' if result['success'] else 'error',
                             'error': result.get('error'),
+                            'stats': self.stats.copy()
+                        })
+
+                except TimeoutError:
+                    # Handle timeout
+                    with self.stats_lock:
+                        self.stats['failed'] += 1
+                        self.stats['timeout'] += 1
+                        self.stats['timeout_file_list'].append(file_info.get('client_name'))
+
+                    error_msg = f"Processing timed out after {self.timeout_seconds}s"
+                    print(f"⏱️  TIMEOUT: {file_info.get('client_name')} - {error_msg}")
+
+                    if self.progress_callback:
+                        self.progress_callback({
+                            'phase': 'processing',
+                            'current': completed,
+                            'total': len(clients_to_process),
+                            'client_name': file_info.get('client_name'),
+                            'status': 'timeout',
+                            'error': error_msg,
                             'stats': self.stats.copy()
                         })
 
@@ -196,11 +236,15 @@ class ClientProcessor:
         Returns:
             Result dictionary with success status
         """
+        start_time = datetime.now()
         result = {
             'success': False,
             'json_written': False,
             'sqlite_written': False,
-            'error': None
+            'error': None,
+            'start_time': start_time,
+            'end_time': None,
+            'duration_seconds': None
         }
 
         try:
@@ -209,8 +253,13 @@ class ClientProcessor:
             file_path = Path(file_info['file_path'])
             label = file_info.get('client_name') or file_info.get('filename') or file_path.name
 
+            print(f"[{start_time.strftime('%H:%M:%S')}] START: {label}")
+
             # Extract client data
+            extraction_start = datetime.now()
             client_data = extractor.extract_client_data(str(file_path), file_info)
+            extraction_duration = (datetime.now() - extraction_start).total_seconds()
+            print(f"  → Extraction completed in {extraction_duration:.2f}s")
 
             processing_metadata = client_data.get('processing_metadata', {})
             errors: List[str] = []
@@ -223,19 +272,27 @@ class ClientProcessor:
             # Save to JSON storage (thread-safe)
             if extraction_success and self.json_storage:
                 try:
+                    json_start = datetime.now()
                     self.json_storage.save_client(client_data)
+                    json_duration = (datetime.now() - json_start).total_seconds()
+                    print(f"  → JSON save completed in {json_duration:.2f}s")
                     result['json_written'] = True
                 except Exception as e:
                     errors.append(f"JSON save failed for {label}: {e}")
+                    print(f"  ✗ JSON save failed: {e}")
 
             # Save to SQLite database (with lock)
             if extraction_success and self.db:
                 try:
+                    sqlite_start = datetime.now()
                     with self.stats_lock:
                         self.db.save_client(client_data)
+                    sqlite_duration = (datetime.now() - sqlite_start).total_seconds()
+                    print(f"  → SQLite save completed in {sqlite_duration:.2f}s")
                     result['sqlite_written'] = True
                 except Exception as e:
                     errors.append(f"SQLite save failed for {label}: {e}")
+                    print(f"  ✗ SQLite save failed: {e}")
 
             if errors:
                 result['error'] = " | ".join(errors)
@@ -244,6 +301,12 @@ class ClientProcessor:
 
         except Exception as e:
             result['error'] = f"Processing crashed for {file_info.get('filename') or file_info.get('file_path')}: {e}"
+            print(f"  ✗ Processing crashed: {e}")
+
+        finally:
+            result['end_time'] = datetime.now()
+            result['duration_seconds'] = (result['end_time'] - start_time).total_seconds()
+            print(f"[{result['end_time'].strftime('%H:%M:%S')}] END: {label} (Total: {result['duration_seconds']:.2f}s)")
 
         return result
 
@@ -330,6 +393,12 @@ def main():
         default=4,
         help='Number of concurrent workers (default: 4)'
     )
+    parser.add_argument(
+        '--timeout',
+        type=int,
+        default=300,
+        help='Timeout per file in seconds (default: 300 = 5 minutes)'
+    )
 
     args = parser.parse_args()
 
@@ -364,12 +433,26 @@ def main():
             print(f"   Selected: {stats['selected_files']}")
             print(f"   Processed: {stats['processed']}")
             print(f"   Failed: {stats['failed']}")
+            print(f"   Timeout: {stats.get('timeout', 0)}")
+            print(f"   Slow files (>60s): {stats.get('slow_files', 0)}")
             print(f"   JSON files written: {stats.get('json_written', 0)}")
             print(f"   SQLite records written: {stats.get('sqlite_written', 0)}")
 
             if stats['end_time'] and stats['start_time']:
                 duration = stats['end_time'] - stats['start_time']
                 print(f"   Duration: {duration}")
+
+            # Show timeout files if any
+            if stats.get('timeout_file_list'):
+                print(f"\n⏱️  Files that timed out:")
+                for filename in stats['timeout_file_list']:
+                    print(f"   - {filename}")
+
+            # Show slow files if any
+            if stats.get('slow_file_list'):
+                print(f"\n⚠️  Slow files (took >60s):")
+                for item in stats['slow_file_list']:
+                    print(f"   - {item['file']}: {item['duration']:.1f}s")
 
     # Run processor
     with ClientProcessor(
@@ -379,7 +462,8 @@ def main():
         enable_json=not args.no_json,
         enable_sqlite=not args.no_sqlite,
         max_workers=args.workers,
-        progress_callback=progress_callback
+        progress_callback=progress_callback,
+        timeout_seconds=args.timeout
     ) as processor:
         processor.process_all(reprocess=args.reprocess)
 
