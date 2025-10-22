@@ -22,6 +22,7 @@ from client_database import ClientDatabase
 from pattern_clustering import PatternClusterer
 from schema_builder import SchemaBuilder
 from client_summary import ClientSummary
+from client_data_viewer import ClientDataViewer
 
 
 # Page configuration
@@ -62,7 +63,8 @@ def main():
             "🔗 1. SharePoint Download",
             "📦 2. JSON Extraction & Clustering",
             "📋 3. Client Summary",
-            "🔍 4. Schema Discovery & Analysis"
+            "👁️ 4. Client Data Viewer",
+            "🔍 5. Schema Discovery & Analysis"
         ]
     )
 
@@ -72,7 +74,9 @@ def main():
         stage_json_extraction()
     elif stage == "📋 3. Client Summary":
         stage_client_summary()
-    elif stage == "🔍 4. Schema Discovery & Analysis":
+    elif stage == "👁️ 4. Client Data Viewer":
+        stage_client_data_viewer()
+    elif stage == "🔍 5. Schema Discovery & Analysis":
         stage_schema_discovery()
 
 
@@ -833,12 +837,226 @@ def stage_client_summary():
 
 
 # =============================================================================
-# STAGE 4: Schema Discovery & Analysis
+# STAGE 4: Client Data Viewer
+# =============================================================================
+
+def stage_client_data_viewer():
+    """Stage 4: View and search client data."""
+    st.header("👁️ Stage 4: Client Data Viewer")
+
+    st.markdown("""
+    Search for clients and view their extracted data in a readable format.
+    Data is displayed on a **best-effort basis** - showing key-value pairs, tables, and raw data.
+    """)
+
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.subheader("Data Source")
+
+        # Choose data source
+        data_source = st.radio(
+            "Select data source",
+            ["JSON Storage", "SQLite Database"],
+            help="Choose where to read the processed client data from"
+        )
+
+        if data_source == "JSON Storage":
+            json_path = st.text_input("JSON Storage Path", value="./extracted_json")
+            json_storage = JSONStorage(json_path)
+            viewer = ClientDataViewer(json_storage=json_storage)
+        else:
+            db_path = st.text_input("SQLite Database Path", value="client_data.db")
+            database = ClientDatabase(db_path)
+            viewer = ClientDataViewer(database=database)
+
+    with col2:
+        st.subheader("Search Options")
+
+        # Get filter options
+        countries = ['All'] + viewer.get_countries()
+        products = ['All'] + viewer.get_products()
+
+        search_col1, search_col2 = st.columns(2)
+
+        with search_col1:
+            country_filter = st.selectbox("Country", countries)
+
+        with search_col2:
+            product_filter = st.selectbox("Product", products)
+
+        search_term = st.text_input(
+            "Search Client Name",
+            placeholder="Enter client name to search..."
+        )
+
+    # Search button
+    if st.button("🔍 Search Clients", type="primary") or search_term:
+        country = None if country_filter == 'All' else country_filter
+        product = None if product_filter == 'All' else product_filter
+
+        with st.spinner("Searching..."):
+            results = viewer.search_clients(
+                search_term=search_term if search_term else None,
+                country=country,
+                product=product,
+                limit=100
+            )
+
+        if results:
+            st.success(f"✅ Found {len(results)} clients")
+
+            # Create a selection list
+            client_options = {}
+            for r in results:
+                display_name = f"{r.get('client_name')} - {r.get('country')}/{r.get('product')}"
+                client_options[display_name] = r.get('client_id')
+
+            selected_display = st.selectbox(
+                "Select a client to view:",
+                options=list(client_options.keys())
+            )
+
+            if selected_display:
+                selected_client_id = client_options[selected_display]
+
+                # Get full client data
+                client_data = viewer.get_client_data(selected_client_id)
+
+                if client_data:
+                    # Display client info
+                    summary = viewer.get_client_summary(client_data)
+
+                    st.markdown("---")
+                    st.subheader(f"📄 {summary['client_name']}")
+
+                    # Summary metrics
+                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+                    with metric_col1:
+                        st.metric("Country", summary['country'])
+
+                    with metric_col2:
+                        st.metric("Product", summary['product'])
+
+                    with metric_col3:
+                        st.metric("Sheets", summary['sheet_count'])
+
+                    with metric_col4:
+                        st.metric("Sections", summary['total_sections'])
+
+                    # File info
+                    with st.expander("📁 File Information", expanded=True):
+                        st.write(f"**Filename:** {summary['filename']}")
+                        st.write(f"**File Path:** {summary['file_path']}")
+                        st.write(f"**Extracted Date:** {summary.get('extracted_date', 'N/A')}")
+                        st.write(f"**Processing Status:** {summary['processing_status']}")
+                        st.write(f"**Processed At:** {summary.get('processed_at', 'N/A')}")
+
+                    # Export options
+                    export_col1, export_col2 = st.columns(2)
+
+                    with export_col1:
+                        if st.button("📥 Export to Excel"):
+                            excel_filename = f"{summary['client_name'].replace(' ', '_')}_data.xlsx"
+                            try:
+                                viewer.export_client_to_excel(selected_client_id, excel_filename)
+                                st.success(f"✅ Exported to {excel_filename}")
+
+                                # Provide download button
+                                with open(excel_filename, 'rb') as f:
+                                    st.download_button(
+                                        label="⬇️ Download Excel",
+                                        data=f,
+                                        file_name=excel_filename,
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                    )
+                            except Exception as e:
+                                st.error(f"Export failed: {e}")
+
+                    with export_col2:
+                        if st.button("📥 Export to JSON"):
+                            json_filename = f"{summary['client_name'].replace(' ', '_')}_data.json"
+                            try:
+                                viewer.export_client_to_json(selected_client_id, json_filename)
+                                st.success(f"✅ Exported to {json_filename}")
+
+                                # Provide download button
+                                with open(json_filename, 'rb') as f:
+                                    st.download_button(
+                                        label="⬇️ Download JSON",
+                                        data=f,
+                                        file_name=json_filename,
+                                        mime="application/json"
+                                    )
+                            except Exception as e:
+                                st.error(f"Export failed: {e}")
+
+                    # Display sheets in tabs
+                    sheets = client_data.get('sheets', [])
+
+                    if sheets:
+                        st.markdown("---")
+                        st.subheader("📊 Extracted Data")
+
+                        # Create tabs for each sheet
+                        sheet_names = [sheet.get('sheet_name', f'Sheet {i+1}') for i, sheet in enumerate(sheets)]
+                        sheet_tabs = st.tabs(sheet_names)
+
+                        for tab, sheet in zip(sheet_tabs, sheets):
+                            with tab:
+                                sections = sheet.get('sections', [])
+
+                                if not sections:
+                                    st.info("No sections found in this sheet")
+                                    continue
+
+                                # Display each section
+                                for idx, section in enumerate(sections):
+                                    section_header = section.get('section_header') or f"Section {idx + 1}"
+                                    section_type, df = viewer.format_section(section)
+
+                                    # Display section header
+                                    st.markdown(f"### {section_header}")
+                                    st.caption(f"Type: {section_type}")
+
+                                    if df.empty:
+                                        st.info("No data in this section")
+                                    else:
+                                        # Display based on section type
+                                        if section_type == 'key_value':
+                                            # Display as two-column layout for key-value
+                                            st.dataframe(
+                                                df,
+                                                use_container_width=True,
+                                                hide_index=True
+                                            )
+                                        else:
+                                            # Display as table
+                                            st.dataframe(
+                                                df,
+                                                use_container_width=True,
+                                                hide_index=True
+                                            )
+
+                                    st.markdown("---")
+                    else:
+                        st.warning("No sheets found in this client data")
+
+                else:
+                    st.error("Failed to load client data")
+
+        else:
+            st.warning("No clients found matching your search criteria")
+
+
+# =============================================================================
+# STAGE 5: Schema Discovery & Analysis
 # =============================================================================
 
 def stage_schema_discovery():
-    """Stage 4: Schema discovery and data model analysis."""
-    st.header("🔍 Stage 4: Schema Discovery & Data Model Analysis")
+    """Stage 5: Schema discovery and data model analysis."""
+    st.header("🔍 Stage 5: Schema Discovery & Data Model Analysis")
 
     if not st.session_state.clustering_complete:
         st.warning("⚠️ Please run pattern clustering first (Stage 2)")
