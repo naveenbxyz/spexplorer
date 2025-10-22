@@ -15,6 +15,50 @@ from client_database import ClientDatabase
 from json_storage import JSONStorage
 
 
+class TimeoutException(Exception):
+    """Custom exception for timeout."""
+    pass
+
+
+def run_with_timeout(func, args=(), kwargs=None, timeout_duration=300):
+    """
+    Run a function with a timeout.
+
+    Args:
+        func: Function to run
+        args: Positional arguments
+        kwargs: Keyword arguments
+        timeout_duration: Timeout in seconds
+
+    Returns:
+        Result from function or raises TimeoutException
+    """
+    if kwargs is None:
+        kwargs = {}
+
+    result = [TimeoutException(f"Function timed out after {timeout_duration}s")]
+
+    def target():
+        try:
+            result[0] = func(*args, **kwargs)
+        except Exception as e:
+            result[0] = e
+
+    thread = threading.Thread(target=target)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_duration)
+
+    if thread.is_alive():
+        # Thread is still running - timeout occurred
+        raise TimeoutException(f"Processing timed out after {timeout_duration}s")
+
+    if isinstance(result[0], Exception):
+        raise result[0]
+
+    return result[0]
+
+
 class ClientProcessor:
     """
     Process Excel files and generate client JSON documents.
@@ -146,12 +190,31 @@ class ClientProcessor:
                 completed += 1
 
                 try:
-                    # Apply timeout to future result
-                    result = future.result(timeout=self.timeout_seconds)
+                    # Get result (timeout is already enforced within the function)
+                    result = future.result()
 
-                    # Check if file was slow (over 60 seconds)
+                    # Check if this was a timeout
+                    if result.get('timed_out'):
+                        with self.stats_lock:
+                            self.stats['failed'] += 1
+                            self.stats['timeout'] += 1
+                            self.stats['timeout_file_list'].append(file_info.get('client_name'))
+
+                        if self.progress_callback:
+                            self.progress_callback({
+                                'phase': 'processing',
+                                'current': completed,
+                                'total': len(clients_to_process),
+                                'client_name': file_info.get('client_name'),
+                                'status': 'timeout',
+                                'error': result.get('error'),
+                                'stats': self.stats.copy()
+                            })
+                        continue
+
+                    # Check if file was slow (over 60 seconds but didn't timeout)
                     duration = result.get('duration_seconds', 0)
-                    if duration > 60:
+                    if duration > 60 and not result.get('timed_out'):
                         with self.stats_lock:
                             self.stats['slow_files'] += 1
                             self.stats['slow_file_list'].append({
@@ -181,27 +244,6 @@ class ClientProcessor:
                             'stats': self.stats.copy()
                         })
 
-                except TimeoutError:
-                    # Handle timeout
-                    with self.stats_lock:
-                        self.stats['failed'] += 1
-                        self.stats['timeout'] += 1
-                        self.stats['timeout_file_list'].append(file_info.get('client_name'))
-
-                    error_msg = f"Processing timed out after {self.timeout_seconds}s"
-                    print(f"⏱️  TIMEOUT: {file_info.get('client_name')} - {error_msg}")
-
-                    if self.progress_callback:
-                        self.progress_callback({
-                            'phase': 'processing',
-                            'current': completed,
-                            'total': len(clients_to_process),
-                            'client_name': file_info.get('client_name'),
-                            'status': 'timeout',
-                            'error': error_msg,
-                            'stats': self.stats.copy()
-                        })
-
                 except Exception as e:
                     with self.stats_lock:
                         self.stats['failed'] += 1
@@ -228,7 +270,38 @@ class ClientProcessor:
 
     def _process_client_safe(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process a single client Excel file (thread-safe wrapper).
+        Process a single client Excel file (thread-safe wrapper with timeout).
+
+        Args:
+            file_info: File information with client metadata
+
+        Returns:
+            Result dictionary with success status
+        """
+        try:
+            return run_with_timeout(
+                self._process_client_internal,
+                args=(file_info,),
+                timeout_duration=self.timeout_seconds
+            )
+        except TimeoutException as e:
+            # File processing timed out
+            label = file_info.get('client_name') or file_info.get('filename', 'unknown')
+            print(f"⏱️  TIMEOUT: {label} exceeded {self.timeout_seconds}s limit")
+            return {
+                'success': False,
+                'json_written': False,
+                'sqlite_written': False,
+                'error': str(e),
+                'start_time': datetime.now(),
+                'end_time': datetime.now(),
+                'duration_seconds': self.timeout_seconds,
+                'timed_out': True
+            }
+
+    def _process_client_internal(self, file_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Internal method to process a single client Excel file.
 
         Args:
             file_info: File information with client metadata
@@ -244,7 +317,8 @@ class ClientProcessor:
             'error': None,
             'start_time': start_time,
             'end_time': None,
-            'duration_seconds': None
+            'duration_seconds': None,
+            'timed_out': False
         }
 
         try:

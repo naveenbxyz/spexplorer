@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import hashlib
+import threading
 
 
 class JSONStorage:
@@ -35,6 +36,9 @@ class JSONStorage:
         # Load or initialize metadata index
         self.metadata_index = self._load_metadata_index()
 
+        # Thread lock for metadata index access
+        self.index_lock = threading.Lock()
+
     def _load_metadata_index(self) -> Dict[str, Any]:
         """Load metadata index from file."""
         if self.metadata_path.exists():
@@ -50,6 +54,7 @@ class JSONStorage:
 
     def _save_metadata_index(self):
         """Save metadata index to file."""
+        # Note: This should be called within a lock context
         self.metadata_index['last_updated'] = datetime.now().isoformat()
         with open(self.metadata_path, 'w', encoding='utf-8') as f:
             json.dump(self.metadata_index, f, indent=2, ensure_ascii=False)
@@ -79,9 +84,10 @@ class JSONStorage:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(client_data, f, indent=2, ensure_ascii=False)
 
-        # Update metadata index
-        self._update_metadata_index(client_data, str(file_path.relative_to(self.base_path)))
-        self._save_metadata_index()
+        # Update metadata index (thread-safe)
+        with self.index_lock:
+            self._update_metadata_index(client_data, str(file_path.relative_to(self.base_path)))
+            self._save_metadata_index()
 
         return str(file_path)
 
@@ -143,11 +149,12 @@ class JSONStorage:
         Returns:
             Client data dictionary or None
         """
-        metadata = self.metadata_index['clients'].get(client_id)
-        if not metadata:
-            return None
+        with self.index_lock:
+            metadata = self.metadata_index['clients'].get(client_id)
+            if not metadata:
+                return None
+            file_path = self.base_path / metadata['file_path']
 
-        file_path = self.base_path / metadata['file_path']
         if not file_path.exists():
             return None
 
@@ -183,7 +190,11 @@ class JSONStorage:
         """
         results = []
 
-        for client_id, metadata in self.metadata_index['clients'].items():
+        # Create a copy of the dictionary items to iterate safely
+        with self.index_lock:
+            clients_items = list(self.metadata_index['clients'].items())
+
+        for client_id, metadata in clients_items:
             # Apply filters
             if query and query.lower() not in (metadata.get('client_name') or '').lower():
                 continue
@@ -218,7 +229,8 @@ class JSONStorage:
         Returns:
             Statistics dictionary
         """
-        clients = self.metadata_index['clients'].values()
+        with self.index_lock:
+            clients = list(self.metadata_index['clients'].values())
 
         stats = {
             'total_clients': len(clients),
@@ -234,20 +246,22 @@ class JSONStorage:
 
     def get_countries(self) -> List[str]:
         """Get list of all countries."""
-        countries = set(
-            metadata.get('country')
-            for metadata in self.metadata_index['clients'].values()
-            if metadata.get('country')
-        )
+        with self.index_lock:
+            countries = set(
+                metadata.get('country')
+                for metadata in self.metadata_index['clients'].values()
+                if metadata.get('country')
+            )
         return sorted(list(countries))
 
     def get_products(self) -> List[str]:
         """Get list of all products."""
-        products = set(
-            metadata.get('product')
-            for metadata in self.metadata_index['clients'].values()
-            if metadata.get('product')
-        )
+        with self.index_lock:
+            products = set(
+                metadata.get('product')
+                for metadata in self.metadata_index['clients'].values()
+                if metadata.get('product')
+            )
         return sorted(list(products))
 
     def get_all_fields(self) -> Dict[str, int]:
@@ -259,7 +273,10 @@ class JSONStorage:
         """
         field_counts = {}
 
-        for metadata in self.metadata_index['clients'].values():
+        with self.index_lock:
+            clients_metadata = list(self.metadata_index['clients'].values())
+
+        for metadata in clients_metadata:
             for field in metadata.get('fields', []):
                 field_counts[field] = field_counts.get(field, 0) + 1
 
@@ -303,11 +320,12 @@ class JSONStorage:
         Args:
             cluster_assignments: Dictionary mapping client_id -> cluster_id
         """
-        for client_id, cluster_id in cluster_assignments.items():
-            if client_id in self.metadata_index['clients']:
-                self.metadata_index['clients'][client_id]['pattern_cluster_id'] = cluster_id
+        with self.index_lock:
+            for client_id, cluster_id in cluster_assignments.items():
+                if client_id in self.metadata_index['clients']:
+                    self.metadata_index['clients'][client_id]['pattern_cluster_id'] = cluster_id
 
-        self._save_metadata_index()
+            self._save_metadata_index()
 
     def export_to_csv(self, output_path: str, fields: Optional[List[str]] = None):
         """
@@ -319,19 +337,23 @@ class JSONStorage:
         """
         import csv
 
-        if not self.metadata_index['clients']:
-            return
+        with self.index_lock:
+            if not self.metadata_index['clients']:
+                return
 
-        # Determine fields
-        if fields is None:
-            sample_metadata = next(iter(self.metadata_index['clients'].values()))
-            fields = [k for k in sample_metadata.keys() if k != 'fields']
+            # Determine fields
+            if fields is None:
+                sample_metadata = next(iter(self.metadata_index['clients'].values()))
+                fields = [k for k in sample_metadata.keys() if k != 'fields']
+
+            # Get a copy of the metadata to work with outside the lock
+            clients_metadata = list(self.metadata_index['clients'].values())
 
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
 
-            for metadata in self.metadata_index['clients'].values():
+            for metadata in clients_metadata:
                 row = {k: metadata.get(k) for k in fields}
                 writer.writerow(row)
 
@@ -356,29 +378,32 @@ class JSONStorage:
         """
         print("🔄 Rebuilding metadata index from JSON files...")
 
-        self.metadata_index = {
-            'version': '1.0',
-            'last_updated': datetime.now().isoformat(),
-            'total_clients': 0,
-            'clients': {}
-        }
+        with self.index_lock:
+            self.metadata_index = {
+                'version': '1.0',
+                'last_updated': datetime.now().isoformat(),
+                'total_clients': 0,
+                'clients': {}
+            }
 
-        # Scan all JSON files
-        json_files = list(self.json_dir.rglob("*.json"))
+            # Scan all JSON files
+            json_files = list(self.json_dir.rglob("*.json"))
 
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    client_data = json.load(f)
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        client_data = json.load(f)
 
-                relative_path = str(json_file.relative_to(self.base_path))
-                self._update_metadata_index(client_data, relative_path)
+                    relative_path = str(json_file.relative_to(self.base_path))
+                    self._update_metadata_index(client_data, relative_path)
 
-            except Exception as e:
-                print(f"⚠️  Error reading {json_file}: {e}")
+                except Exception as e:
+                    print(f"⚠️  Error reading {json_file}: {e}")
 
-        self._save_metadata_index()
-        print(f"✅ Rebuilt index with {len(self.metadata_index['clients'])} clients")
+            self._save_metadata_index()
+            client_count = len(self.metadata_index['clients'])
+
+        print(f"✅ Rebuilt index with {client_count} clients")
 
 
 if __name__ == '__main__':
