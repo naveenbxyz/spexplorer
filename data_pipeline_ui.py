@@ -21,6 +21,7 @@ from json_storage import JSONStorage
 from client_database import ClientDatabase
 from pattern_clustering import PatternClusterer
 from schema_builder import SchemaBuilder
+from client_summary import ClientSummary
 
 
 # Page configuration
@@ -60,7 +61,8 @@ def main():
         [
             "🔗 1. SharePoint Download",
             "📦 2. JSON Extraction & Clustering",
-            "🔍 3. Schema Discovery & Analysis"
+            "📋 3. Client Summary",
+            "🔍 4. Schema Discovery & Analysis"
         ]
     )
 
@@ -68,7 +70,9 @@ def main():
         stage_sharepoint_download()
     elif stage == "📦 2. JSON Extraction & Clustering":
         stage_json_extraction()
-    elif stage == "🔍 3. Schema Discovery & Analysis":
+    elif stage == "📋 3. Client Summary":
+        stage_client_summary()
+    elif stage == "🔍 4. Schema Discovery & Analysis":
         stage_schema_discovery()
 
 
@@ -587,12 +591,254 @@ def stage_json_extraction():
 
 
 # =============================================================================
-# STAGE 3: Schema Discovery & Analysis
+# STAGE 3: Client Summary
+# =============================================================================
+
+def stage_client_summary():
+    """Stage 3: Client summary and file overview."""
+    st.header("📋 Stage 3: Client Summary")
+
+    st.markdown("""
+    Generate a comprehensive summary of all processed client files, including:
+    - Client names and products
+    - File types (PSCAF, NECAF, or Other)
+    - Sheet names in each file
+    - Multiple versions with latest highlighted
+    - Relative file paths
+    """)
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Data Source")
+
+        # Choose data source
+        data_source = st.radio(
+            "Select data source",
+            ["JSON Storage", "SQLite Database"],
+            help="Choose where to read the processed client data from"
+        )
+
+        if data_source == "JSON Storage":
+            json_path = st.text_input("JSON Storage Path", value="./extracted_json")
+            source_path = json_path
+        else:
+            db_path = st.text_input("SQLite Database Path", value="client_data.db")
+            source_path = db_path
+
+        root_folder = st.text_input(
+            "Root Folder (for relative paths)",
+            value="",
+            help="Optional: Root folder to calculate relative paths (leave empty to use full paths)"
+        )
+
+    with col2:
+        st.subheader("Output Options")
+
+        output_format = st.multiselect(
+            "Export Formats",
+            ["Excel", "CSV", "Display in Browser"],
+            default=["Display in Browser"]
+        )
+
+        if "Excel" in output_format:
+            excel_output = st.text_input("Excel Output Path", value="client_summary.xlsx")
+
+        if "CSV" in output_format:
+            csv_output = st.text_input("CSV Output Path", value="client_summary.csv")
+
+    if st.button("📊 Generate Summary", type="primary"):
+        with st.spinner("Generating summary..."):
+            try:
+                # Initialize data source
+                if data_source == "JSON Storage":
+                    json_storage = JSONStorage(json_path)
+                    summary = ClientSummary(json_storage=json_storage)
+                else:
+                    database = ClientDatabase(db_path)
+                    summary = ClientSummary(database=database)
+
+                # Generate summary DataFrame
+                root = root_folder if root_folder.strip() else None
+                df = summary.generate_summary(root_folder=root)
+
+                if df.empty:
+                    st.warning("⚠️ No data found. Please ensure files have been processed.")
+                    return
+
+                # Display statistics
+                st.success(f"✅ Generated summary for {len(df)} files")
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Clients", df['client_name'].nunique())
+                with col2:
+                    st.metric("Total Files", len(df))
+                with col3:
+                    pscaf_count = len(df[df['file_type'] == 'PSCAF'])
+                    st.metric("PSCAF Files", pscaf_count)
+                with col4:
+                    necaf_count = len(df[df['file_type'] == 'NECAF'])
+                    st.metric("NECAF Files", necaf_count)
+
+                # Display in tabs
+                tab1, tab2, tab3, tab4 = st.tabs([
+                    "📋 All Files",
+                    "📊 By Client & Product",
+                    "📁 PSCAF Files",
+                    "📁 NECAF Files"
+                ])
+
+                with tab1:
+                    st.subheader("All Files")
+                    st.info(f"Showing all {len(df)} processed files")
+
+                    # Format date for display
+                    display_df = df.copy()
+                    if 'extracted_date' in display_df.columns:
+                        display_df['extracted_date'] = display_df['extracted_date'].apply(
+                            lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+                        )
+
+                    # Add filters
+                    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+                    with filter_col1:
+                        clients = ['All'] + sorted(display_df['client_name'].dropna().unique().tolist())
+                        selected_client = st.selectbox("Filter by Client", clients)
+
+                    with filter_col2:
+                        products = ['All'] + sorted(display_df['product'].dropna().unique().tolist())
+                        selected_product = st.selectbox("Filter by Product", products)
+
+                    with filter_col3:
+                        file_types = ['All'] + sorted(display_df['file_type'].dropna().unique().tolist())
+                        selected_file_type = st.selectbox("Filter by File Type", file_types)
+
+                    # Apply filters
+                    filtered_df = display_df.copy()
+                    if selected_client != 'All':
+                        filtered_df = filtered_df[filtered_df['client_name'] == selected_client]
+                    if selected_product != 'All':
+                        filtered_df = filtered_df[filtered_df['product'] == selected_product]
+                    if selected_file_type != 'All':
+                        filtered_df = filtered_df[filtered_df['file_type'] == selected_file_type]
+
+                    st.dataframe(
+                        filtered_df,
+                        use_container_width=True,
+                        height=400
+                    )
+
+                with tab2:
+                    st.subheader("Summary by Client & Product")
+                    grouped_df = summary.generate_grouped_summary(root_folder=root)
+
+                    if not grouped_df.empty:
+                        # Format for display
+                        grouped_display = grouped_df.copy()
+                        if 'latest_date' in grouped_display.columns:
+                            grouped_display['latest_date'] = grouped_display['latest_date'].apply(
+                                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+                            )
+
+                        # Show summary stats
+                        st.dataframe(
+                            grouped_display[['client_name', 'product', 'file_type', 'version_count', 'latest_file', 'latest_date', 'sheets']],
+                            use_container_width=True,
+                            height=400
+                        )
+
+                        # Show version details in expander
+                        st.markdown("### Version Details")
+                        for idx, row in grouped_df.iterrows():
+                            with st.expander(f"{row['client_name']} - {row['product']} - {row['file_type']}"):
+                                st.write(f"**Sheets:** {row['sheets']}")
+                                st.write(f"**Total Versions:** {row['version_count']}")
+                                st.write("**All Versions:**")
+
+                                for version in row['all_versions']:
+                                    is_latest = "🟢 **LATEST**" if version['is_latest'] else ""
+                                    date_str = version['date'].strftime('%Y-%m-%d') if version['date'] else 'No date'
+                                    st.write(f"  - {is_latest} {version['filename']} ({date_str})")
+                                    st.write(f"    📁 {version['relative_path']}")
+
+                with tab3:
+                    st.subheader("PSCAF Files Only")
+                    pscaf_df = df[df['file_type'] == 'PSCAF'].copy()
+
+                    if not pscaf_df.empty:
+                        st.info(f"Found {len(pscaf_df)} PSCAF files")
+
+                        # Format date
+                        if 'extracted_date' in pscaf_df.columns:
+                            pscaf_df['extracted_date'] = pscaf_df['extracted_date'].apply(
+                                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+                            )
+
+                        st.dataframe(pscaf_df, use_container_width=True, height=400)
+                    else:
+                        st.warning("No PSCAF files found")
+
+                with tab4:
+                    st.subheader("NECAF Files Only")
+                    necaf_df = df[df['file_type'] == 'NECAF'].copy()
+
+                    if not necaf_df.empty:
+                        st.info(f"Found {len(necaf_df)} NECAF files")
+
+                        # Format date
+                        if 'extracted_date' in necaf_df.columns:
+                            necaf_df['extracted_date'] = necaf_df['extracted_date'].apply(
+                                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else ''
+                            )
+
+                        st.dataframe(necaf_df, use_container_width=True, height=400)
+                    else:
+                        st.warning("No NECAF files found")
+
+                # Export options
+                if "Excel" in output_format:
+                    with st.spinner("Exporting to Excel..."):
+                        summary.export_to_excel(excel_output, root_folder=root)
+                        st.success(f"✅ Excel exported to: {excel_output}")
+
+                        # Provide download button
+                        with open(excel_output, 'rb') as f:
+                            st.download_button(
+                                label="⬇️ Download Excel",
+                                data=f,
+                                file_name=excel_output,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+
+                if "CSV" in output_format:
+                    with st.spinner("Exporting to CSV..."):
+                        summary.export_to_csv(csv_output, root_folder=root)
+                        st.success(f"✅ CSV exported to: {csv_output}")
+
+                        # Provide download button
+                        with open(csv_output, 'rb') as f:
+                            st.download_button(
+                                label="⬇️ Download CSV",
+                                data=f,
+                                file_name=csv_output,
+                                mime="text/csv"
+                            )
+
+            except Exception as e:
+                st.error(f"❌ Error generating summary: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+
+
+# =============================================================================
+# STAGE 4: Schema Discovery & Analysis
 # =============================================================================
 
 def stage_schema_discovery():
-    """Stage 3: Schema discovery and data model analysis."""
-    st.header("🔍 Stage 3: Schema Discovery & Data Model Analysis")
+    """Stage 4: Schema discovery and data model analysis."""
+    st.header("🔍 Stage 4: Schema Discovery & Data Model Analysis")
 
     if not st.session_state.clustering_complete:
         st.warning("⚠️ Please run pattern clustering first (Stage 2)")
